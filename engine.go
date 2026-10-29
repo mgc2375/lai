@@ -61,8 +61,8 @@ func findEngine(cfg *Config) (string, error) {
 	if cfg.Engine != "" {
 		return expandPath(cfg.Engine), nil
 	}
-	if exe, err := os.Executable(); err == nil {
-		if p := filepath.Join(filepath.Dir(exe), "lai-engine"); fileExists(p) {
+	if d := exeDir(); d != "" {
+		if p := filepath.Join(d, "lai-engine"); fileExists(p) {
 			return p, nil
 		}
 	}

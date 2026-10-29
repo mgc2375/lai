@@ -10,19 +10,21 @@ Each weight exists once: the model file is memory-mapped and computed on in plac
 ## Install (Parrot OS / Debian)
 
 ```sh
-sudo apt install build-essential cmake git
-./install.sh                      # CPU-only build tuned for this machine
+git clone https://github.com/mgc2375/lai.git && cd lai && ./install.sh
 ```
 
-With an NVIDIA GPU, build with Vulkan. It only needs the NVIDIA driver at runtime, whereas CUDA needs several GB of CUDA libraries. Check the driver first:
+That's the whole setup. `install.sh`:
 
-```sh
-vulkaninfo --summary              # should list your GPU (needs the NVIDIA driver)
-sudo apt install libvulkan-dev glslc
-LAI_GPU=vulkan ./install.sh       # or cuda / rocm
-```
+1. finds your `.gguf` (or pass one: `./install.sh /path/to/model.gguf`; with several found, it asks);
+2. builds for Vulkan if you have a discrete GPU with a working Vulkan driver, otherwise CPU-only (an integrated GPU would hold the weights twice in RAM, so it's skipped);
+3. installs the build tools with apt if they're missing, and clears apt's download cache afterwards;
+4. builds `lai-engine` against llama.cpp `b11982`, in `/tmp`, removed afterwards;
+5. puts `lai`, `lai-engine` and a `config.json` in a `lai` folder **next to your model**, so a model on a USB drive gets everything beside it;
+6. writes the config: your model, a context-cache budget sized to your RAM, and recommended sampling for Qwen models.
 
-This installs `lai` and `lai-engine` to `~/.local/bin`. The engine is compiled from llama.cpp tag `b11982`, the version its code is tested against, and the source is deleted after the build. Both files are standalone: copy them anywhere, such as a USB drive, and lai finds `lai-engine` next to itself.
+After that, and after every reboot, just run that folder's `lai`. It reads the `config.json` next to it. Running `install.sh` again skips the build if nothing changed.
+
+Overrides: `LAI_GPU=cpu|vulkan|cuda|rocm`, `LAI_DIR=/install/here`.
 
 ## Use
 

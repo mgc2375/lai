@@ -104,7 +104,26 @@ func defaultConfigPath() string {
 	if p := os.Getenv("LAI_CONFIG"); p != "" {
 		return p
 	}
+	// a config.json beside the binary wins, so a folder on a USB drive
+	// (lai, lai-engine, config.json) works on its own after every boot
+	if d := exeDir(); d != "" {
+		if p := filepath.Join(d, "config.json"); fileExists(p) {
+			return p
+		}
+	}
 	return filepath.Join(configDir(), "config.json")
+}
+
+// exeDir is the real directory of the running binary, following symlinks.
+func exeDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if r, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = r
+	}
+	return filepath.Dir(exe)
 }
 
 func defaultShell() string {
