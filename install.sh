@@ -80,6 +80,20 @@ pick_gpu() {
   fi
 }
 
+# build_engine WORK [cmake flags...]: configure and compile lai-engine,
+# printing the relevant part of the log on failure
+build_engine() {
+  local work="$1"; shift
+  if ! cmake -S "$HERE/engine" -B "$work/build" -DLLAMA_DIR="$work/llama.cpp" -DCMAKE_BUILD_TYPE=Release "$@" >"$work/cmake.log" 2>&1; then
+    grep -E -A4 'CMake Error' "$work/cmake.log" | head -20 >&2
+    return 1
+  fi
+  if ! cmake --build "$work/build" --target lai-engine -j"$(nproc)" >"$work/build.log" 2>&1; then
+    grep -E 'error' "$work/build.log" | head -20 >&2
+    return 1
+  fi
+}
+
 json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 # write_config FILE MODEL GPU: settings sized to this machine
@@ -170,7 +184,7 @@ main() {
     local pkgs=(build-essential cmake git) missing=() p flags=()
     case "$gpu" in
       cpu)    ;;
-      vulkan) pkgs+=(libvulkan-dev glslc); flags+=(-DGGML_VULKAN=ON) ;;
+      vulkan) pkgs+=(libvulkan-dev glslc spirv-headers); flags+=(-DGGML_VULKAN=ON) ;;
       cuda)   pkgs+=(nvidia-cuda-toolkit); flags+=(-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native) ;;
       rocm)   flags+=(-DGGML_HIP=ON) ;;
       *) die "unknown LAI_GPU=$gpu (cpu, vulkan, cuda, rocm)" ;;
@@ -187,10 +201,14 @@ main() {
     say "fetching llama.cpp $LLAMA_TAG"
     git clone -q --depth 1 --branch "$LLAMA_TAG" https://github.com/ggml-org/llama.cpp "$work/llama.cpp"
     say "building lai-engine; this takes a few minutes"
-    cmake -S "$HERE/engine" -B "$work/build" -DLLAMA_DIR="$work/llama.cpp" -DCMAKE_BUILD_TYPE=Release ${flags[@]+"${flags[@]}"} >"$work/cmake.log" 2>&1 \
-      || { tail -30 "$work/cmake.log" >&2; die "cmake failed (full log: $work/cmake.log)"; }
-    cmake --build "$work/build" --target lai-engine -j"$(nproc)" >"$work/build.log" 2>&1 \
-      || { grep -E 'error|Error' "$work/build.log" | head -20 >&2; die "build failed (full log: $work/build.log)"; }
+    if ! build_engine "$work" ${flags[@]+"${flags[@]}"}; then
+      [ "$gpu" != cpu ] || die "build failed (logs: $work/cmake.log, $work/build.log)"
+      warn "the $gpu build failed (logs in $work); building for CPU instead"
+      gpu=cpu
+      want="$LLAMA_TAG cpu"
+      rm -rf "$work/build"
+      build_engine "$work" || die "CPU build failed too (logs: $work/cmake.log, $work/build.log)"
+    fi
     install -m 755 "$work/build/lai-engine" "$dir/lai-engine"
     echo "$want" > "$stamp"
     rm -rf "$work"
