@@ -59,3 +59,12 @@ func TestEditFile(t *testing.T) {
 		t.Fatalf("got %q", b)
 	}
 }
+
+func TestEngineErrorText(t *testing.T) {
+	if got := (&apiError{Body: "vk::Queue::submit: ErrorDeviceLost"}).Error(); got != "engine: vk::Queue::submit: ErrorDeviceLost" {
+		t.Fatalf("got %q", got)
+	}
+	if !isContextError(&apiError{Body: "the request exceeds the available context size"}) {
+		t.Fatal("engine context errors must still trigger compaction")
+	}
+}

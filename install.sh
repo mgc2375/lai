@@ -72,7 +72,15 @@ pick_gpu() {
   if ! command -v vulkaninfo >/dev/null 2>&1; then
     $SUDO apt-get install -y -qq vulkan-tools >/dev/null 2>&1 || true
   fi
-  if vulkaninfo --summary 2>/dev/null | grep -q 'PHYSICAL_DEVICE_TYPE_DISCRETE_GPU'; then
+  local vk
+  vk="$(vulkaninfo --summary 2>/dev/null || true)"
+  if printf '%s' "$vk" | grep -q 'PHYSICAL_DEVICE_TYPE_DISCRETE_GPU'; then
+    # nouveau's Vulkan driver (NVK) loses the device under heavy compute
+    if printf '%s' "$vk" | grep -qiE 'driverName *= *NVK|MESA_NVK|nouveau'; then
+      warn "your NVIDIA GPU is on the open-source nouveau/NVK driver, which crashes on this workload; building for CPU (install nvidia-driver to use the GPU)"
+      echo cpu
+      return
+    fi
     echo vulkan
   else
     warn "found a GPU but no working Vulkan driver for it (NVIDIA: install nvidia-driver); building for CPU"
@@ -92,6 +100,48 @@ build_engine() {
     grep -E 'error' "$work/build.log" | head -20 >&2
     return 1
   fi
+}
+
+# install_engine DIR GPU: install build tools, build lai-engine for GPU
+# (cpu, vulkan, cuda, rocm) and put it in DIR. Returns 1 if the build fails.
+install_engine() {
+  local dir="$1" gpu="$2"
+  local pkgs=(build-essential cmake git) missing=() p flags=()
+  case "$gpu" in
+    cpu)    ;;
+    vulkan) pkgs+=(libvulkan-dev glslc spirv-headers); flags+=(-DGGML_VULKAN=ON) ;;
+    cuda)   pkgs+=(nvidia-cuda-toolkit); flags+=(-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native) ;;
+    rocm)   flags+=(-DGGML_HIP=ON) ;;
+    *) die "unknown LAI_GPU=$gpu (cpu, vulkan, cuda, rocm)" ;;
+  esac
+  for p in "${pkgs[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
+  if [ ${#missing[@]} -gt 0 ]; then
+    say "installing build tools: ${missing[*]}"
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq "${missing[@]}"
+    $SUDO apt-get clean  # drop the downloaded .debs (they sit in RAM on a live boot)
+  fi
+  local work="${TMPDIR:-/tmp}/lai-build"
+  rm -rf "$work"
+  say "fetching llama.cpp $LLAMA_TAG"
+  git clone -q --depth 1 --branch "$LLAMA_TAG" https://github.com/ggml-org/llama.cpp "$work/llama.cpp"
+  say "building lai-engine; this takes a few minutes"
+  build_engine "$work" ${flags[@]+"${flags[@]}"} || return 1
+  install -m 755 "$work/build/lai-engine" "$dir/lai-engine"
+  echo "$LLAMA_TAG $gpu" > "$dir/.lai-engine-build"
+  rm -rf "$work"
+}
+
+# gpu_works ENGINE MODEL: generate one token on the GPU build. Some drivers
+# build fine but lose the device as soon as real work starts.
+gpu_works() {
+  local out
+  out="$(printf '%s\n' '{"messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
+         | timeout 900 "$1" -m "$2" -c 1024 --cpu-moe --kv q8_0 --ubatch 256 2>/dev/null || true)"
+  case "$out" in
+    *'"done"'*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
@@ -181,37 +231,23 @@ main() {
   if [ -x "$dir/lai-engine" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$want" ]; then
     say "lai-engine already built ($want)"
   else
-    local pkgs=(build-essential cmake git) missing=() p flags=()
-    case "$gpu" in
-      cpu)    ;;
-      vulkan) pkgs+=(libvulkan-dev glslc spirv-headers); flags+=(-DGGML_VULKAN=ON) ;;
-      cuda)   pkgs+=(nvidia-cuda-toolkit); flags+=(-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native) ;;
-      rocm)   flags+=(-DGGML_HIP=ON) ;;
-      *) die "unknown LAI_GPU=$gpu (cpu, vulkan, cuda, rocm)" ;;
-    esac
-    for p in "${pkgs[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
-    if [ ${#missing[@]} -gt 0 ]; then
-      say "installing build tools: ${missing[*]}"
-      $SUDO apt-get update -qq
-      $SUDO apt-get install -y -qq "${missing[@]}"
-      $SUDO apt-get clean  # drop the downloaded .debs (they sit in RAM on a live boot)
-    fi
-    local work="${TMPDIR:-/tmp}/lai-build"
-    rm -rf "$work"
-    say "fetching llama.cpp $LLAMA_TAG"
-    git clone -q --depth 1 --branch "$LLAMA_TAG" https://github.com/ggml-org/llama.cpp "$work/llama.cpp"
-    say "building lai-engine; this takes a few minutes"
-    if ! build_engine "$work" ${flags[@]+"${flags[@]}"}; then
-      [ "$gpu" != cpu ] || die "build failed (logs: $work/cmake.log, $work/build.log)"
-      warn "the $gpu build failed (logs in $work); building for CPU instead"
+    if ! install_engine "$dir" "$gpu"; then
+      [ "$gpu" != cpu ] || die "build failed (logs in ${TMPDIR:-/tmp}/lai-build)"
+      warn "the $gpu build failed; building for CPU instead"
       gpu=cpu
-      want="$LLAMA_TAG cpu"
-      rm -rf "$work/build"
-      build_engine "$work" || die "CPU build failed too (logs: $work/cmake.log, $work/build.log)"
+      install_engine "$dir" cpu || die "CPU build failed too (logs in ${TMPDIR:-/tmp}/lai-build)"
     fi
-    install -m 755 "$work/build/lai-engine" "$dir/lai-engine"
-    echo "$want" > "$stamp"
-    rm -rf "$work"
+  fi
+
+  if [ "$gpu" != cpu ]; then
+    say "testing the $gpu build on your model (loads it once, can take a minute)"
+    if gpu_works "$dir/lai-engine" "$model"; then
+      say "the GPU works"
+    else
+      warn "the $gpu build crashed on your GPU (driver problem); rebuilding for CPU"
+      gpu=cpu
+      install_engine "$dir" cpu || die "CPU build failed (logs in ${TMPDIR:-/tmp}/lai-build)"
+    fi
   fi
 
   # 6. config, kept if one is already there

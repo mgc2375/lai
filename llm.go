@@ -73,6 +73,9 @@ type apiError struct {
 }
 
 func (e *apiError) Error() string {
+	if e.Status == 0 { // from lai-engine, not an HTTP server
+		return "engine: " + strings.TrimSpace(e.Body)
+	}
 	return fmt.Sprintf("server returned %d: %s", e.Status, strings.TrimSpace(e.Body))
 }
 

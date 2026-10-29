@@ -207,7 +207,7 @@ func (e *Engine) Chat(ctx context.Context, msgs []Message, tools []ToolDef, emit
 			emit(outThink, *ev.Think)
 		case ev.Error != nil:
 			// same shape as a server error, so context-full detection still works
-			return out, st, &apiError{Status: 400, Body: *ev.Error}
+			return out, st, &apiError{Body: *ev.Error}
 		case ev.Done != nil:
 			out.Content = ev.Done.Content
 			for i, tc := range ev.Done.ToolCalls {
