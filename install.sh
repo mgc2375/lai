@@ -225,9 +225,13 @@ main() {
 
   # 7. check both binaries start
   "$dir/lai" version >/dev/null || die "$dir/lai doesn't run"
-  if ! "$dir/lai-engine" 2>&1 | grep -q usage; then
-    die "$dir/lai-engine doesn't start: $("$dir/lai-engine" 2>&1 | head -3)"
-  fi
+  # with no arguments it prints usage and exits 2, so look at the output, not the status
+  local engine_out
+  engine_out="$("$dir/lai-engine" 2>&1 || true)"
+  case "$engine_out" in
+    *usage*) ;;
+    *) die "$dir/lai-engine doesn't start: $(printf '%s\n' "$engine_out" | head -3)" ;;
+  esac
 
   # put lai on PATH for this session too
   if [ "$dir" != "$HOME/.local/bin" ]; then

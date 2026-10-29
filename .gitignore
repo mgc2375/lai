@@ -3,3 +3,4 @@
 /lai-engine
 /build/
 *.gguf
+config.json
