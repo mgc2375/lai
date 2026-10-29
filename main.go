@@ -22,6 +22,7 @@ const usageText = `lai - lightweight local AI agent for GGUF models
 
 usage:
   lai [flags] [prompt]          chat (one-shot if a prompt is given or stdin is piped)
+  lai serve [flags]             web chat for your phone, locked by an access key (see README)
   lai mcp ls                  connect to configured MCP servers and list their tools
   lai mcp add <name> [-e K=V]... [--trust] -- <command> [args...]
   lai mcp add <name> --url <url> [-H "Key: Value"]... [--trust]
@@ -48,6 +49,8 @@ func main() {
 		cmd = args[0]
 	}
 	switch cmd {
+	case "serve":
+		err = cmdServe(args[1:])
 	case "mcp":
 		err = cmdMCP(args[1:])
 	case "config":

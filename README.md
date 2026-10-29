@@ -2,7 +2,7 @@
 
 A small local AI agent for the terminal. It loads a GGUF model into memory and lets it work on your machine through shell, file and MCP tools. It's two files with no runtime dependencies:
 
-- **`lai`** (~6 MB, static Go): the chat interface, tools, approvals and MCP client. Uses ~12 MB of RAM.
+- **`lai`** (~6 MB, static Go): the chat interface, tools, approvals, MCP client and the optional phone page. Uses ~12 MB of RAM.
 - **`lai-engine`** (C++, built from llama.cpp): loads the model and generates text. It contains only llama.cpp's inference core plus its chat-template and tool-call parsing: no HTTP server, web UI, multimodal, model downloader or other tools. lai talks to it over a pipe (one JSON message per line), and it exits when lai does.
 
 Each weight exists once: the model file is memory-mapped and computed on in place (llama.cpp's weight repacking, which keeps a second copy in RAM, is turned off), and any layers you put on the GPU live only in VRAM.
@@ -46,6 +46,22 @@ Pick a model that can call tools reliably, such as Qwen3 (4B and up, including 3
 ### Root commands
 
 The `bash` tool runs commands as you, with no stdin, so `sudo` can't prompt for a password. If you want the model to run root commands, either run `lai` as root (`sudo -E lai`) or allow specific commands in `/etc/sudoers.d/` with `NOPASSWD`.
+
+## Use it from your phone (`lai serve`)
+
+`lai serve` runs the same agent behind a small chat page, so a phone can send messages to your running session and read the replies (tool use included). It listens on `127.0.0.1` only, and every request needs an access key.
+
+```sh
+lai serve                                  # http://127.0.0.1:8090, prints a login link
+lai serve --ngrok YOUR-DOMAIN.ngrok-free.dev   # also starts the tunnel and prints the phone link
+```
+
+- The first run creates a random access key in `serve.key` next to your `config.json` (mode 600). The printed link (`https://…/?key=…`) logs a browser in with a cookie and then drops the key from the address bar. Treat the link like a password: **anyone holding it can run commands on your machine**. Delete `serve.key` to rotate it.
+- One conversation is shared between the terminal session and every device that's logged in. If the phone loses signal or the tab sleeps, it reconnects and catches up from where it was. **Stop** cancels the current reply and **Clear** starts over.
+- Tools follow `auto_approve`: with it off, tool calls from the web page are refused, since there's no one at a terminal to approve them.
+- Wrong keys are slowed down, and ten in a minute lock logins for a minute.
+
+**ngrok setup (once):** install ngrok, then `ngrok config add-authtoken <your token>`. Free accounts get one static domain, and a domain can only be online in one place at a time, so stop anything else using it first. ngrok's free plan shows a "Visit Site" warning page the first time a browser opens the link.
 
 ## MCP
 

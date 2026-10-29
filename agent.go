@@ -21,12 +21,13 @@ type Agent struct {
 	useTools bool
 	msgs     []Message
 	in       *bufio.Reader // terminal input for prompts and approvals; nil if none
+	out      io.Writer     // where replies and tool activity are written
 	auto     bool
 	allowed  map[string]bool
 }
 
 func newAgent(cfg *Config, llm Backend, tools *Registry, mcp *MCPManager, useTools bool, in *bufio.Reader) *Agent {
-	a := &Agent{cfg: cfg, llm: llm, tools: tools, mcp: mcp, useTools: useTools, in: in, auto: cfg.AutoApprove, allowed: map[string]bool{}}
+	a := &Agent{cfg: cfg, llm: llm, tools: tools, mcp: mcp, useTools: useTools, in: in, out: os.Stdout, auto: cfg.AutoApprove, allowed: map[string]bool{}}
 	a.reset()
 	return a
 }
@@ -70,12 +71,16 @@ func systemPrompt(cfg *Config, useTools bool) string {
 
 // Turn runs one user prompt to completion, including any tool rounds.
 func (a *Agent) Turn(input string) error {
-	a.msgs = append(a.msgs, Message{Role: "user", Content: input})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	setInterrupt(cancel)
 	defer setInterrupt(nil)
+	return a.TurnCtx(ctx, input)
+}
 
+// TurnCtx is Turn with the caller's context: cancelling it stops the reply.
+func (a *Agent) TurnCtx(ctx context.Context, input string) error {
+	a.msgs = append(a.msgs, Message{Role: "user", Content: input})
 	var defs []ToolDef
 	if a.useTools {
 		defs = a.tools.Defs()
@@ -83,7 +88,7 @@ func (a *Agent) Turn(input string) error {
 	for step := 0; step < a.cfg.MaxSteps; step++ {
 		msg, st, err := a.complete(ctx, defs)
 		if ctx.Err() != nil {
-			fmt.Println(c(yellow, "\n[interrupted]"))
+			fmt.Fprintln(a.out, c(yellow, "\n[interrupted]"))
 			if msg.Content == "" {
 				msg.Content = "[interrupted]"
 			}
@@ -99,11 +104,11 @@ func (a *Agent) Turn(input string) error {
 		}
 		a.msgs = append(a.msgs, msg)
 		if len(msg.ToolCalls) == 0 {
-			if st.Tokens > 0 && isTerminal(os.Stdout) {
+			if st.Tokens > 0 && (a.out != io.Writer(os.Stdout) || isTerminal(os.Stdout)) {
 				if st.TokPerSec > 0 {
-					fmt.Println(c(dim, fmt.Sprintf("[%d tokens, %.1f tok/s]", st.Tokens, st.TokPerSec)))
+					fmt.Fprintln(a.out, c(dim, fmt.Sprintf("[%d tokens, %.1f tok/s]", st.Tokens, st.TokPerSec)))
 				} else {
-					fmt.Println(c(dim, fmt.Sprintf("[%d tokens]", st.Tokens)))
+					fmt.Fprintln(a.out, c(dim, fmt.Sprintf("[%d tokens]", st.Tokens)))
 				}
 			}
 			return nil
@@ -116,21 +121,21 @@ func (a *Agent) Turn(input string) error {
 			a.msgs = append(a.msgs, Message{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: out})
 		}
 		if ctx.Err() != nil {
-			fmt.Println(c(yellow, "[interrupted]"))
+			fmt.Fprintln(a.out, c(yellow, "[interrupted]"))
 			return nil
 		}
 	}
-	fmt.Println(c(yellow, fmt.Sprintf("[stopped after %d tool rounds; say 'continue' to go on]", a.cfg.MaxSteps)))
+	fmt.Fprintln(a.out, c(yellow, fmt.Sprintf("[stopped after %d tool rounds; say 'continue' to go on]", a.cfg.MaxSteps)))
 	return nil
 }
 
 func (a *Agent) complete(ctx context.Context, defs []ToolDef) (Message, Stats, error) {
 	for attempt := 0; ; attempt++ {
-		p := &printer{}
+		p := &printer{w: a.out}
 		msg, st, err := a.llm.Chat(ctx, a.msgs, defs, p.emit)
 		p.end()
 		if err != nil && isContextError(err) && attempt < 5 && a.compact() {
-			fmt.Println(c(yellow, "[context full: dropped oldest messages]"))
+			fmt.Fprintln(a.out, c(yellow, "[context full: dropped oldest messages]"))
 			continue
 		}
 		return msg, st, err
@@ -159,17 +164,17 @@ func (a *Agent) compact() bool {
 func (a *Agent) runTool(ctx context.Context, tc ToolCall) string {
 	t := a.tools.Get(tc.Function.Name)
 	if t == nil {
-		fmt.Println(c(red, "● unknown tool "+tc.Function.Name))
+		fmt.Fprintln(a.out, c(red, "● unknown tool "+tc.Function.Name))
 		return fmt.Sprintf("error: unknown tool %q", tc.Function.Name)
 	}
 	args := map[string]any{}
 	if s := strings.TrimSpace(tc.Function.Arguments); s != "" && s != "null" {
 		if err := json.Unmarshal([]byte(s), &args); err != nil {
-			fmt.Println(c(red, "● "+t.Name+": bad arguments"))
+			fmt.Fprintln(a.out, c(red, "● "+t.Name+": bad arguments"))
 			return "error: arguments are not valid JSON: " + err.Error()
 		}
 	}
-	fmt.Println(c(cyan, "● "+t.Name) + " " + t.Show(args))
+	fmt.Fprintln(a.out, c(cyan, "● "+t.Name)+" "+t.Show(args))
 	if t.Ask && !a.auto && !a.allowed[t.Name] {
 		ok, note := a.confirm(t.Name)
 		if !ok {
@@ -184,19 +189,19 @@ func (a *Agent) runTool(ctx context.Context, tc ToolCall) string {
 	if err != nil {
 		out = strings.TrimSpace("error: " + err.Error() + "\n" + out)
 	}
-	fmt.Println(c(dim, preview(out, "  ", 8)))
+	fmt.Fprintln(a.out, c(dim, preview(out, "  ", 8)))
 	return truncateMiddle(out, a.cfg.MaxOutput)
 }
 
 func (a *Agent) confirm(tool string) (bool, string) {
 	if a.in == nil {
-		fmt.Println(c(red, "  denied: no terminal to ask for approval (use -y to allow tools)"))
+		fmt.Fprintln(a.out, c(red, "  denied: no terminal to ask for approval (use -y to allow tools)"))
 		return false, ""
 	}
-	fmt.Print(c(yellow, "  allow? [y]es  [n]o  [a]lways "+tool+"  (or type feedback): "))
+	fmt.Fprint(a.out, c(yellow, "  allow? [y]es  [n]o  [a]lways "+tool+"  (or type feedback): "))
 	line, err := a.in.ReadString('\n')
 	if err != nil && line == "" {
-		fmt.Println(c(red, "denied"))
+		fmt.Fprintln(a.out, c(red, "denied"))
 		return false, ""
 	}
 	ans := strings.TrimSpace(line)
@@ -214,6 +219,7 @@ func (a *Agent) confirm(tool string) (bool, string) {
 
 // printer streams model output, showing reasoning dimmed.
 type printer struct {
+	w        io.Writer
 	thinking bool
 	wrote    bool
 	lastNL   bool
@@ -222,10 +228,10 @@ type printer struct {
 func (p *printer) emit(kind int, s string) {
 	if kind == outThink && !p.thinking {
 		p.thinking = true
-		fmt.Print(colorOn(dim))
+		fmt.Fprint(p.w, colorOn(dim))
 	} else if kind == outText && p.thinking {
 		p.thinking = false
-		fmt.Print(colorOff() + "\n")
+		fmt.Fprint(p.w, colorOff()+"\n")
 	}
 	if kind == outText && !p.wrote {
 		s = strings.TrimLeft(s, "\n")
@@ -233,17 +239,17 @@ func (p *printer) emit(kind int, s string) {
 	if s == "" {
 		return
 	}
-	fmt.Print(s)
+	fmt.Fprint(p.w, s)
 	p.wrote = true
 	p.lastNL = strings.HasSuffix(s, "\n")
 }
 
 func (p *printer) end() {
 	if p.thinking {
-		fmt.Print(colorOff())
+		fmt.Fprint(p.w, colorOff())
 	}
 	if p.wrote && !p.lastNL {
-		fmt.Println()
+		fmt.Fprintln(p.w)
 	}
 }
 

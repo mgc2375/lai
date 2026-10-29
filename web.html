@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>lai</title>
+<style>
+:root{--bg:#0f1115;--fg:#e6e6e6;--dim:#8b93a1;--accent:#4ade80;--box:#181b22;--line:#2a2f3a}
+@media (prefers-color-scheme:light){:root{--bg:#fff;--fg:#1a1d23;--dim:#6b7280;--accent:#15803d;--box:#f3f4f6;--line:#d8dce3}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:15px/1.45 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column}
+header{display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line)}
+header b{flex:1}
+#st{color:var(--dim);font-size:13px}
+button{font:inherit;background:var(--box);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px 12px}
+button.go{background:var(--accent);color:#000;border-color:var(--accent);font-weight:600}
+#log{flex:1;overflow:auto;margin:0;padding:12px;white-space:pre-wrap;word-break:break-word}
+form{display:flex;gap:8px;padding:8px 12px calc(8px + env(safe-area-inset-bottom));border-top:1px solid var(--line)}
+textarea{flex:1;font:inherit;background:var(--box);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px;resize:none;min-height:44px;max-height:30vh}
+</style>
+</head>
+<body>
+<header><b>lai</b><span id="st">connecting…</span><button id="stop" hidden>Stop</button><button id="clear">Clear</button></header>
+<pre id="log"></pre>
+<form id="f"><textarea id="t" rows="1" placeholder="Message (Ctrl+Enter sends)" autocomplete="off"></textarea><button class="go">Send</button></form>
+<script>
+const $ = id => document.getElementById(id), log = $('log'), st = $('st'), dec = new TextDecoder();
+let off = 0, running = false;
+
+function add(s) {
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+  log.textContent += s;
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+function setBusy(b) { st.textContent = b ? 'working…' : 'ready'; $('stop').hidden = !b; }
+async function api(path, opt) {
+  const r = await fetch(path, Object.assign({credentials: 'same-origin'}, opt));
+  if (r.status === 401) { location.reload(); throw new Error('unauthorized'); }
+  return r;
+}
+async function state() { return (await api('/api/state')).json(); }
+
+// Follow the transcript from byte offset `off` until the reply finishes.
+// Reconnects by itself if the phone loses signal or the tab sleeps.
+async function follow() {
+  if (running) return;
+  running = true;
+  try {
+    for (;;) {
+      const r = await api('/api/stream?from=' + off);
+      const start = parseInt(r.headers.get('X-Lai-From') || off, 10);
+      if (start > off) add('\n[older output dropped]\n');
+      off = start;
+      const rd = r.body.getReader();
+      for (;;) {
+        const {done, value} = await rd.read();
+        if (done) break;
+        off += value.length;
+        add(dec.decode(value, {stream: true}));
+      }
+      const s = await state();
+      setBusy(s.busy);
+      if (!s.busy) break;
+    }
+  } catch (e) {
+    st.textContent = 'offline, retrying…';
+    setTimeout(() => { running = false; follow(); }, 2000);
+    return;
+  }
+  running = false;
+}
+
+$('f').onsubmit = async e => {
+  e.preventDefault();
+  const t = $('t'), m = t.value.trim();
+  if (!m) return;
+  const r = await api('/api/chat', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message: m})});
+  if (r.status === 409) { st.textContent = 'still working…'; return; }
+  t.value = ''; t.style.height = '';
+  setBusy(true);
+  follow();
+};
+$('t').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('f').requestSubmit(); });
+$('t').addEventListener('input', e => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; });
+$('stop').onclick = () => api('/api/stop', {method: 'POST'});
+$('clear').onclick = async () => {
+  const r = await api('/api/clear', {method: 'POST'});
+  if (r.ok) { log.textContent = ''; off = 0; }
+};
+
+state().then(s => { setBusy(s.busy); follow(); });
+</script>
+</body>
+</html>
