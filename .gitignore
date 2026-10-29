@@ -1,0 +1,5 @@
+# local builds (dist/ is committed so install.sh works without Go)
+/lai
+/lai-engine
+/build/
+*.gguf

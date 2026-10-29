@@ -1,0 +1,60 @@
+{
+  "model": "/media/user/usb/models/Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated.i1-IQ3_XS.gguf",
+  "url": "",
+  "api_key": "",
+  "engine": "",
+  "ctx_size": 0,
+  "gpu_layers": -1,
+  "threads": 0,
+  "kv_cache": "q8_0",
+  "flash_attn": "auto",
+  "ubatch": 256,
+  "moe_on_cpu": true,
+  "kv_in_ram": true,
+  "kv_limit_mb": 6144,
+  "temperature": 0.7,
+  "top_p": 0.8,
+  "top_k": 20,
+  "min_p": 0,
+  "repeat_penalty": 1.05,
+  "max_tokens": 0,
+  "system_prompt": "",
+  "auto_approve": true,
+  "shell": "/bin/bash",
+  "command_timeout": 120,
+  "max_output": 16000,
+  "max_steps": 40,
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "${HOME}"
+      ],
+      "trust": true
+    },
+    "github": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "disabled": true
+    },
+    "remote-example": {
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MY_MCP_TOKEN}"
+      },
+      "disabled": true
+    }
+  }
+}
