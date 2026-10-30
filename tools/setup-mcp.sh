@@ -45,6 +45,15 @@ REGISTRY=(
   "cve|mcp-cve-project|mukul975/cve-mcp-server|py-editable|cve-mcp"
   "shodan|mcp-shodan|@burtthecoder/mcp-shodan|npx|@burtthecoder/mcp-shodan"
   "bloodhound|sec-bloodhound-mcp|mwnickerson/bloodhound_mcp|uvx|bloodhound-mcp"
+  "mcpwn|mcpwn|https://gitlab.com/parrotsec/project/mcpwn.git|go|cmd/mcpwn"
+  "kali-sudohakan|kali-mcp-sudohakan|sudohakan/kali-mcp-server|docker-sse|8000"
+)
+
+# scanners: MCP vulnerability scanners — CLI tools you run AGAINST an MCP
+# server, not servers themselves, so they're installed but not registered.
+SCANNERS=(
+  "teycir|Teycir/Mcpwn|git"
+  "ressl|ressl/mcpwn|pipx"
 )
 
 if [ "$LIST" = 1 ]; then
@@ -71,13 +80,17 @@ ensure_uv() {
   export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 }
 
-clone() { # clone repo dest  (repo is owner/name on GitHub)
+clone() { # clone repo dest  (repo = owner/name on GitHub, or a full git URL)
+  local url="$1"
+  case "$1" in *://*) : ;; *) url="https://github.com/$1.git" ;; esac
   if [ -d "$2/.git" ]; then
     git -C "$2" pull -q --ff-only || warn "$2: pull failed, using the existing checkout"
   else
-    git clone -q --depth 1 "https://github.com/$1.git" "$2"
+    git clone -q --depth 1 "$url" "$2"
   fi
 }
+
+have_docker() { command -v docker >/dev/null 2>&1; }
 
 py_venv() { # py_venv dir  — venv + requirements, reused if present
   local d="$1"
@@ -169,6 +182,48 @@ for e in "${REGISTRY[@]}"; do
       entry "$name" "$(printf '{"command": "uvx", "args": ["--from", "git+https://github.com/%s", "%s"], "env": {"BLOODHOUND_DOMAIN": "${BLOODHOUND_DOMAIN}", "BLOODHOUND_TOKEN_ID": "${BLOODHOUND_TOKEN_ID}", "BLOODHOUND_TOKEN_KEY": "${BLOODHOUND_TOKEN_KEY}"}, "trust": true}' "$repo" "$arg")"
       warn "$name needs BLOODHOUND_DOMAIN / BLOODHOUND_TOKEN_ID / BLOODHOUND_TOKEN_KEY set to connect"
       ;;
+    go) # Go MCP server (ParrotSec/mcpwn): build the binary, run it in its dir so
+        # it finds its mcpwn.yaml; it runs its tools in Docker at runtime
+      ensure_apt git golang-go
+      clone "$repo" "$dir"
+      ( cd "$dir" && go build -o "$dir/${id}" "./$arg" )
+      entry "$name" "$(printf '{"command": "%s/%s", "cwd": "%s", "trust": true}' "$dir" "$id" "$dir")"
+      have_docker || warn "$name runs its tools in Docker; install docker.io for them to work"
+      ;;
+    docker-sse) # server shipped as a Docker image, SSE on :arg (sudohakan/kali-mcp-server)
+      if ! have_docker; then
+        warn "$name needs Docker; install docker.io and rerun. Skipping for now."
+        continue
+      fi
+      ensure_apt git
+      clone "$repo" "$dir"
+      say "building the $name Docker image (slow the first time)"
+      ( cd "$dir" && docker build -q -t "lai-$id" . ) >"$TOOLS_DIR/logs/$id-build.log" 2>&1 \
+        || { warn "$name: docker build failed (log: $TOOLS_DIR/logs/$id-build.log)"; continue; }
+      add_backend "$name" "http://127.0.0.1:$arg/sse" "docker run --rm -p $arg:$arg --name lai-$id lai-$id"
+      entry "$name" "$(printf '{"url": "http://127.0.0.1:%s/sse", "transport": "sse", "trust": true}' "$arg")"
+      ;;
+  esac
+done
+
+# scanners (CLI tools you run AGAINST an MCP server, installed but not registered)
+scanners_note=""
+for e in "${SCANNERS[@]}"; do
+  IFS='|' read -r sid repo method <<< "$e"
+  want "$sid" || continue
+  case "$method" in
+    git)
+      ensure_apt git python3 python3-venv python3-pip
+      sdir="$TOOLS_DIR/scanners/$sid"
+      clone "$repo" "$sdir"; py_venv "$sdir"
+      scanners_note+="  $sid (Mcpwn): $sdir/.venv/bin/python $sdir/mcpwn.py --help"$'\n'
+      ;;
+    pipx)
+      ensure_apt python3 python3-pip pipx
+      pipx install mcpwn >/dev/null 2>&1 || python3 -m pip install -q --user --break-system-packages mcpwn \
+        || warn "couldn't install the ressl mcpwn scanner"
+      scanners_note+="  $sid (mcpwn): mcpwn scan --stdio \"python server.py\""$'\n'
+      ;;
   esac
 done
 
@@ -186,4 +241,8 @@ done
 mv "$BACK.tmp" "$BACK"; chmod +x "$BACK"
 say "wrote $OUT (${#entries[@]} servers)"
 say "backends: $BACK"
+if [ -n "$scanners_note" ]; then
+  echo "MCP vulnerability scanners installed (run them yourself against a server):"
+  printf '%s' "$scanners_note"
+fi
 echo "import into lai with:  lai mcp import \"$OUT\""

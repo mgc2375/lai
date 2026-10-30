@@ -89,6 +89,9 @@ func newStdio(name string, sc MCPServerConfig) (*stdioTransport, error) {
 	for k, v := range sc.Env {
 		cmd.Env = append(cmd.Env, k+"="+os.ExpandEnv(v))
 	}
+	if sc.Cwd != "" {
+		cmd.Dir = expandPath(os.ExpandEnv(sc.Cwd))
+	}
 	cmd.SysProcAttr = childAttr()
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -385,11 +388,20 @@ type MCPServer struct {
 	t     mcpTransport
 }
 
+// newTransportFor picks the SSE transport for an explicit transport:"sse" or a
+// .../sse endpoint, otherwise Streamable HTTP.
+func newTransportFor(sc MCPServerConfig) mcpTransport {
+	if sc.Transport == "sse" || strings.HasSuffix(strings.TrimRight(os.ExpandEnv(sc.URL), "/"), "/sse") {
+		return newSSE(sc)
+	}
+	return newHTTP(sc)
+}
+
 func connectMCP(ctx context.Context, name string, sc MCPServerConfig) *MCPServer {
 	s := &MCPServer{Name: name, Cfg: sc}
 	switch {
 	case sc.URL != "":
-		s.t = newHTTP(sc)
+		s.t = newTransportFor(sc)
 	case sc.Command != "":
 		t, err := newStdio(name, sc)
 		if err != nil {

@@ -10,14 +10,16 @@ import (
 // MCPServerConfig uses the same shape as Claude Desktop / Cursor "mcpServers"
 // entries, so existing configs can be pasted in as-is.
 type MCPServerConfig struct {
-	Command  string            `json:"command,omitempty"`
-	Args     []string          `json:"args,omitempty"`
-	Env      map[string]string `json:"env,omitempty"`
-	URL      string            `json:"url,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty"`
-	Disabled bool              `json:"disabled,omitempty"`
-	Trust    bool              `json:"trust,omitempty"`   // run this server's tools without asking
-	Timeout  int               `json:"timeout,omitempty"` // seconds per tool call (default 300)
+	Command   string            `json:"command,omitempty"`
+	Args      []string          `json:"args,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Cwd       string            `json:"cwd,omitempty"` // working directory for a stdio server
+	URL       string            `json:"url,omitempty"`
+	Transport string            `json:"transport,omitempty"` // "sse" forces the SSE transport for a URL
+	Headers   map[string]string `json:"headers,omitempty"`
+	Disabled  bool              `json:"disabled,omitempty"`
+	Trust     bool              `json:"trust,omitempty"`   // run this server's tools without asking
+	Timeout   int               `json:"timeout,omitempty"` // seconds per tool call (default 300)
 }
 
 type Config struct {
