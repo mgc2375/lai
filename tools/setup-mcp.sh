@@ -48,6 +48,7 @@ REGISTRY=(
   "mcpwn|mcpwn|https://gitlab.com/parrotsec/project/mcpwn.git|go|cmd/mcpwn"
   "kali-sudohakan|kali-mcp-sudohakan|sudohakan/kali-mcp-server|docker-sse|8000"
   "capmonster|capmonster-mcp|capmonster-mcp|uvx-pkg|capmonster-mcp"
+  "browser|stealth-browser-mcp|browserstealthmcp|uvx-pkg|browserstealthmcp"
   "captcha-free|captcha-free|-|local-py|captcha-free/server.py"
 )
 
@@ -204,6 +205,12 @@ for e in "${REGISTRY[@]}"; do
       if [ "$id" = capmonster ]; then
         entry "$name" "$(printf '{"command": "uvx", "args": ["%s"], "env": {"CM_API_KEY": "${CM_API_KEY}"}, "trust": true}' "$arg")"
         warn "$name needs CM_API_KEY (your CapMonster Cloud key) set to connect"
+      elif [ "$id" = browser ]; then
+        # nodriver drives a real Chrome: make sure one is present
+        command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1 \
+          || command -v google-chrome >/dev/null 2>&1 || ensure_apt chromium || ensure_apt chromium-browser || true
+        entry "$name" "$(printf '{"command": "uvx", "args": ["%s"], "trust": true}' "$arg")"
+        warn "$name (stealth browser) needs a Chrome/Chromium on the system; it gives the model navigate/screenshot/click to drive captcha pages itself"
       else
         entry "$name" "$(printf '{"command": "uvx", "args": ["%s"], "trust": true}' "$arg")"
       fi
