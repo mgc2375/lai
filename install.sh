@@ -12,8 +12,21 @@
 #
 # Re-running skips whatever is already done (download, build, config).
 #
+# Persistence (live boot): point LAI_PERSIST at a folder on a real drive
+# (e.g. your USB persistence partition) and the model, the built engine and
+# the config all live there, so after a reboot the same command finds
+# everything ready and just starts - no re-download, no rebuild:
+#
+#   LAI_PERSIST=/run/live/persistence/xxx/lai ./install.sh --serve
+#
+# MCP servers: install.sh imports an OpenCode or Claude Desktop config when it
+# finds one (LAI_MCP overrides the path). Keep that config - and anything the
+# servers need (tool clones, their backends) - on the persistent drive too, so
+# they survive a reboot; lai re-imports the config on every run.
+#
 # Overrides: LAI_MODEL_URL (model to download), LAI_MODEL_DIR (where to keep
-# it), LAI_DIR (install folder), LAI_GPU=cpu|vulkan|cuda|rocm, LLAMA_TAG.
+# it), LAI_DIR (install folder), LAI_MCP (MCP config to import),
+# LAI_GPU=cpu|vulkan|cuda|rocm, LLAMA_TAG.
 set -euo pipefail
 
 # lai-engine uses llama.cpp's internal chat helpers, which change between
@@ -29,6 +42,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# LAI_PERSIST: one folder (on a real drive) for the binaries, model and config,
+# so a live boot finds everything ready next time.
+if [ -n "${LAI_PERSIST:-}" ]; then
+  mkdir -p "$LAI_PERSIST" || die "can't create LAI_PERSIST=$LAI_PERSIST"
+  : "${LAI_DIR:=$LAI_PERSIST}"
+  : "${LAI_MODEL_DIR:=$LAI_PERSIST/models}"
+fi
 
 file_mb() { echo $(( $(wc -c < "$1") / 1048576 )); }
 

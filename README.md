@@ -34,7 +34,23 @@ What `install.sh` does, skipping anything already done:
 
 On a live boot everything lives in RAM: run the same command after each reboot. To keep the model and build between boots, point `LAI_MODEL_DIR` and `LAI_DIR` at a persistent drive.
 
-Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_GPU=cpu|vulkan|cuda|rocm`.
+### Live boot: survive reboots and keep your MCP tools
+
+On a live USB everything is wiped on reboot, so by default each boot re-downloads the model and rebuilds. Point `LAI_PERSIST` at a folder on your persistence partition and the model, the built engine and the config all live there; the next boot finds them ready and just starts:
+
+```sh
+LAI_PERSIST=/run/live/persistence/*/lai ./install.sh --serve
+```
+
+Your MCP servers (`mcp-kali-server`, `hexstrike-ai`, impacket/BloodHound wrappers, etc.) each run a local command or backend, so they aren't bundled. Set them up once the way you already do in OpenCode, keep that config **and the tool clones/backends on the persistence partition**, and lai re-imports the config on every run — automatically when it's at a standard path, or point to it with `LAI_MCP`:
+
+```sh
+LAI_PERSIST=/run/live/persistence/*/lai LAI_MCP=/run/live/persistence/*/opencode.json ./install.sh --serve
+```
+
+That way one command brings back the model, the agent, the phone page and all your tools. (CAPTCHA-solving servers like `capmonster-mcp` are the one thing lai won't wire up for you; import carries over whatever is in your own config.)
+
+Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP`, `LAI_PERSIST`, `LAI_GPU=cpu|vulkan|cuda|rocm`.
 
 ## Use
 
