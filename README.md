@@ -35,11 +35,19 @@ git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
 
 ```sh
 git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
-  LAI_PERSIST=/dev/sdc3 SWAP_DEV=sda ./install.sh --serve --mcp --memguard
+  LAI_PERSIST=/dev/sdc3 SWAP_DEV=sdb ./install.sh --serve --mcp --memguard
 ```
 
-- `LAI_PERSIST=/dev/sdc3` mounts that partition and keeps the binaries, engine, **all MCP tools** and config there, so nothing re-clones or rebuilds next boot. The **model stays in RAM** (re-downloaded each boot; set `LAI_MODEL_DIR` to keep it on disk too).
-- `--memguard` runs `tools/memguard.sh` (root) while lai runs: it adds a swapfile on the SSD (`SWAP_DEV=sda`), ramps `vm.swappiness` up as RAM fills (gentle under 22 GB → maximal by 29 GB), caps lai's whole process tree at a 29 GB soft limit via cgroup `memory.high` so the kernel pushes it to swap before the box runs out, makes the kernel reclaim earlier, and drops clean page cache after 8 min idle. Tune with `SOFT_CAP_GB=29 RAMP_START_GB=22 IDLE_MIN=8 SWAP_SIZE=24G`. Stop it with `sudo pkill -f memguard.sh`.
+- `LAI_PERSIST=/dev/sdc3` mounts that partition and keeps the binaries, engine, **all MCP tools** and config there, so nothing re-clones or rebuilds next boot. The **model stays in RAM** at `$HOME/models` (re-downloaded each boot). On a standard Parrot live boot `$HOME` is a RAM overlay; if your persistence also covers `/home`, force RAM with `LAI_MODEL_DIR=/dev/shm/lai-models`. To keep the model on disk instead, point `LAI_MODEL_DIR` at the partition.
+- `--memguard` runs `tools/memguard.sh` (root) while lai runs: it puts **swap on a data disk** (`SWAP_DEV=sdb` — never your Windows SSD), ramps `vm.swappiness` up as RAM fills (gentle under 22 GB → maximal by 29 GB), caps lai's whole process tree at a 29 GB soft limit via cgroup `memory.high` so the kernel pushes it to swap before the box runs out, makes the kernel reclaim earlier, and drops clean page cache after 8 min idle. Tune with `SOFT_CAP_GB=29 RAMP_START_GB=22 IDLE_MIN=8 SWAP_SIZE=24G`. Stop it with `sudo pkill -f memguard.sh`.
+
+  memguard uses a swapfile when the data disk has a Linux (ext4/xfs) filesystem with free space. If it's **NTFS** (common on a Windows-shared data disk), swapfiles don't work there — make a swap partition **once**, in the disk's free space, with the guarded helper (it never touches your existing partitions and asks before writing):
+
+  ```sh
+  sudo bash tools/make-swap.sh sdb 24G
+  ```
+
+  A swap partition lives on the physical disk, so it persists across reboots; memguard reactivates it automatically after that.
 
 **Already have `~/lai`?** Update and rerun:
 
@@ -56,6 +64,10 @@ What it does, skipping anything already done:
 5. **ngrok + `--serve`:** installs ngrok, saves the authtoken, starts the tunnel and prints the phone login link. (Comes set up with a test ngrok account; override with `NGROK_AUTHTOKEN=` / `NGROK_DOMAIN=`, or drop `--serve` to stay terminal-only.)
 
 Leave off `--mcp` for just the agent, or `--serve` for terminal-only. Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP` (import an existing OpenCode/Claude config too), `LAI_PERSIST`, `LAI_MCP_ONLY=hexstrike,kali,…`, `--memguard` (+ `SWAP_DEV`, `SOFT_CAP_GB`, `RAMP_START_GB`, `IDLE_MIN`, `SWAP_SIZE`), `LAI_GPU=cpu|vulkan|cuda|rocm`.
+
+### Parrot OS notes
+
+Built and tested against Parrot/Debian conventions: apt for packages, cgroup v2 (Parrot 6+) for the memory cap, and live-boot overlay/persistence. Every root/optional step degrades gracefully — if cgroup v2, a swap target, Docker or a GPU driver isn't there, that piece is skipped with a logged reason rather than failing the install. The memory guard needs root (the install uses `sudo`); check `memguard.log` to see the swap device and cap it chose.
 
 ## Use
 

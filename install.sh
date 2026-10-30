@@ -459,8 +459,8 @@ main() {
   # memory guard: swap on the SSD + soft RAM cap, running in the background
   if [ "$memguard" = 1 ]; then
     if [ -f "$HERE/tools/memguard.sh" ]; then
-      say "starting the memory guard (swap on /dev/${SWAP_DEV:-sda}, soft cap ${SOFT_CAP_GB:-29}G)"
-      $SUDO env SWAP_DEV="${SWAP_DEV:-sda}" SOFT_CAP_GB="${SOFT_CAP_GB:-29}" \
+      say "starting the memory guard (swap on the data disk, soft cap ${SOFT_CAP_GB:-29}G)"
+      $SUDO env SWAP_DEV="${SWAP_DEV:-}" SOFT_CAP_GB="${SOFT_CAP_GB:-29}" \
         RAMP_START_GB="${RAMP_START_GB:-22}" IDLE_MIN="${IDLE_MIN:-8}" SWAP_SIZE="${SWAP_SIZE:-24G}" \
         setsid bash "$HERE/tools/memguard.sh" >"$dir/memguard.log" 2>&1 < /dev/null &
       echo "  memguard log: $dir/memguard.log  (stop it with: sudo pkill -f memguard.sh)"

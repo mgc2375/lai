@@ -2,7 +2,7 @@
 # memguard.sh — aggressive memory manager for running lai on a 32 GB live box.
 #
 # While it runs it:
-#   * adds a swapfile on the SSD (default: a filesystem on /dev/sda),
+#   * adds swap on a data disk (SWAP_DEV, e.g. sdb) — a swap partition if one exists, else a swapfile on a Linux fs there,
 #   * caps lai's process tree at a soft RAM limit (cgroup v2 memory.high) so the
 #     kernel pushes it to swap before the system runs out,
 #   * ramps vm.swappiness up as RAM fills (gentle under ~22 GB, maximal near the
@@ -13,14 +13,14 @@
 #   sudo LAI_PID=<pid of lai> tools/memguard.sh
 #
 # Tunables (env): SOFT_CAP_GB=29 RAMP_START_GB=22 IDLE_MIN=8 SWAP_SIZE=24G
-#   SWAP_DEV=sda  SWAP_DIR=<a writable dir on the SSD>  INTERVAL=10
+#   SWAP_DEV=sdb  SWAP_DIR=<a writable dir on that disk>  INTERVAL=10
 set -u
 
 SOFT_CAP_GB="${SOFT_CAP_GB:-29}"
 RAMP_START_GB="${RAMP_START_GB:-22}"
 IDLE_MIN="${IDLE_MIN:-8}"
 SWAP_SIZE="${SWAP_SIZE:-24G}"
-SWAP_DEV="${SWAP_DEV:-sda}"
+SWAP_DEV="${SWAP_DEV:-}"
 INTERVAL="${INTERVAL:-10}"
 LAI_PID="${LAI_PID:-0}"
 
@@ -49,14 +49,42 @@ setup_swap() {
     log "existing swap on $SWAP_DEV, leaving it"
     return
   fi
-  local dir="${SWAP_DIR:-}"
+  # if a swap partition already exists on this device (e.g. from make-swap.sh), use it
+  local swp
+  for swp in /dev/${SWAP_DEV}[0-9]*; do
+    [ -b "$swp" ] || continue
+    if [ "$(blkid -o value -s TYPE "$swp" 2>/dev/null)" = swap ]; then
+      swapon "$swp" 2>/dev/null && { log "swap on existing partition $swp"; return; }
+    fi
+  done
+  local dir="${SWAP_DIR:-}" fstype=""
   if [ -z "$dir" ]; then
-    # first writable, non-RAM filesystem backed by $SWAP_DEV
-    while read -r src tgt; do
-      case "$src" in *"$SWAP_DEV"*) [ -w "$tgt" ] && { dir="$tgt"; break; } ;; esac
-    done < <(findmnt -rno SOURCE,TARGET 2>/dev/null)
+    # a mounted writable filesystem on $SWAP_DEV?
+    while read -r src tgt fst; do
+      case "$src" in *"$SWAP_DEV"*) if [ -w "$tgt" ]; then dir="$tgt"; fstype="$fst"; break; fi ;; esac
+    done < <(findmnt -rno SOURCE,TARGET,FSTYPE 2>/dev/null)
+    # not mounted? mount a Linux partition on $SWAP_DEV
+    if [ -z "$dir" ]; then
+      for part in /dev/${SWAP_DEV}[0-9]*; do
+        [ -b "$part" ] || continue
+        case "$(blkid -o value -s TYPE "$part" 2>/dev/null)" in
+          ext4|ext3|xfs)
+            mkdir -p /mnt/lai-swap && mount "$part" /mnt/lai-swap 2>/dev/null \
+              && { dir=/mnt/lai-swap; fstype="$(blkid -o value -s TYPE "$part")"; break; } ;;
+        esac
+      done
+    fi
+  else
+    fstype="$(findmnt -nro FSTYPE --target "$dir" 2>/dev/null)"
   fi
-  [ -n "$dir" ] || { log "no writable filesystem on /dev/$SWAP_DEV; set SWAP_DIR=<path on the SSD>. Running without a swapfile."; return; }
+  [ -n "$dir" ] || { log "no writable Linux filesystem on /dev/$SWAP_DEV. If it's NTFS or has free space, run once:  sudo bash tools/make-swap.sh $SWAP_DEV ${SWAP_SIZE}. Running without a swapfile for now."; return; }
+  case "$fstype" in
+    ext4|ext3|xfs) ;;                      # swapfile works
+    ntfs|ntfs3|fuseblk|vfat|exfat|"")      # swapfiles don't work here
+      log "$SWAP_DEV is $fstype — a swapfile won't work on it. Make a swap partition once:  sudo bash tools/make-swap.sh $SWAP_DEV ${SWAP_SIZE}"; return ;;
+    btrfs)
+      log "btrfs needs a special swapfile setup; make a swap partition instead:  sudo bash tools/make-swap.sh $SWAP_DEV ${SWAP_SIZE}"; return ;;
+  esac
   SWAPFILE="$dir/lai.swap"
   log "creating $SWAP_SIZE swapfile at $SWAPFILE"
   if ! fallocate -l "$SWAP_SIZE" "$SWAPFILE" 2>/dev/null; then
@@ -105,8 +133,21 @@ setup_sysctls() {
   echo 150 > /proc/sys/vm/vfs_cache_pressure 2>/dev/null || true      # reclaim dentry/inode cache more
 }
 
+pick_swap_dev() {
+  # a whole disk that is NOT the one holding the running system
+  local root_src root_disk d
+  root_src="$(findmnt -nro SOURCE / 2>/dev/null)"
+  root_disk="$(lsblk -nro PKNAME "$root_src" 2>/dev/null | head -1)"
+  for d in $(lsblk -dnro NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1}'); do
+    [ "$d" = "$root_disk" ] && continue
+    echo "$d"; return
+  done
+}
+
 main() {
-  log "start: soft cap ${SOFT_CAP_GB}G, ramp from ${RAMP_START_GB}G, idle cache drop after ${IDLE_MIN}m, swap on /dev/$SWAP_DEV"
+  [ -n "$SWAP_DEV" ] || SWAP_DEV="$(pick_swap_dev)"
+  [ -n "$SWAP_DEV" ] || log "couldn't pick a swap disk; set SWAP_DEV=sdb"
+  log "start: soft cap ${SOFT_CAP_GB}G, ramp from ${RAMP_START_GB}G, idle cache drop after ${IDLE_MIN}m, swap on /dev/${SWAP_DEV:-none}"
   setup_swap
   setup_cgroup
   setup_sysctls
