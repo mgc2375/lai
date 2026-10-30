@@ -1,0 +1,8 @@
+# captcha-free MCP server deps
+mcp[cli]<2
+ddddocr            # image/OCR captchas (local, no key)
+playwright-captcha # Cloudflare Turnstile/Interstitial (free click-solve)
+camoufox[geoip]    # stealth browser for turnstile + hcaptcha
+hcaptcha-challenger # hCaptcha (needs GEMINI_API_KEY, free tier)
+PyPasser           # reCAPTCHA v2 audio
+undetected-chromedriver

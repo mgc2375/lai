@@ -48,6 +48,7 @@ REGISTRY=(
   "mcpwn|mcpwn|https://gitlab.com/parrotsec/project/mcpwn.git|go|cmd/mcpwn"
   "kali-sudohakan|kali-mcp-sudohakan|sudohakan/kali-mcp-server|docker-sse|8000"
   "capmonster|capmonster-mcp|capmonster-mcp|uvx-pkg|capmonster-mcp"
+  "captcha-free|captcha-free|-|local-py|captcha-free/server.py"
 )
 
 # scanners: MCP vulnerability scanners — CLI tools you run AGAINST an MCP
@@ -177,6 +178,23 @@ for e in "${REGISTRY[@]}"; do
       else
         entry "$name" "$(printf '{"command": "npx", "args": ["-y", "%s"], "trust": true}' "$arg")"
       fi
+      ;;
+    local-py) # a python MCP server that ships in this repo (tools/<arg>)
+      ensure_apt python3 python3-venv python3-pip
+      local src="$HERE/$arg" sdir
+      sdir="$(dirname "$src")"            # tools/captcha-free
+      dir="$TOOLS_DIR/$id"
+      mkdir -p "$dir"
+      cp -r "$sdir/." "$dir/"             # copy the server + requirements into the tools dir
+      [ -x "$dir/.venv/bin/python" ] || python3 -m venv "$dir/.venv"
+      "$dir/.venv/bin/pip" install -q --upgrade pip >/dev/null 2>&1 || true
+      if [ -f "$dir/requirements.txt" ]; then
+        "$dir/.venv/bin/pip" install -q -r "$dir/requirements.txt" \
+          || warn "$name: some deps failed to install (log above); the server still starts, tools needing them report it"
+      fi
+      "$dir/.venv/bin/python" -m camoufox fetch >/dev/null 2>&1 || true   # stealth browser for turnstile/hcaptcha
+      entry "$name" "$(printf '{"command": "%s/.venv/bin/python", "args": ["%s/%s"], "env": {"GEMINI_API_KEY": "${GEMINI_API_KEY}"}, "trust": true}' "$dir" "$dir" "$(basename "$arg")")"
+      warn "$name: hCaptcha needs GEMINI_API_KEY (free from Google AI Studio); OCR + Turnstile + reCAPTCHA need no key"
       ;;
     uvx-pkg) # published pypi package, run with uvx; arg = package
       ensure_uv
