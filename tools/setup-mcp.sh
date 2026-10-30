@@ -93,7 +93,6 @@ clone() { # clone repo dest  (repo = owner/name on GitHub, or a full git URL)
   fi
 }
 
-have_docker() { command -v docker >/dev/null 2>&1; }
 
 py_venv() { # py_venv dir  — venv + requirements, reused if present
   local d="$1"
@@ -237,25 +236,20 @@ for e in "${REGISTRY[@]}"; do
       warn "$name needs BLOODHOUND_DOMAIN / BLOODHOUND_TOKEN_ID / BLOODHOUND_TOKEN_KEY set to connect"
       ;;
     go) # Go MCP server (ParrotSec/mcpwn): build the binary, run it in its dir so
-        # it finds its mcpwn.yaml; it runs its tools in Docker at runtime
+        # it finds its mcpwn.yaml. By default its tools run in Docker; on Parrot
+        # we strip the docker blocks so they run natively (nmap, sqlmap, …).
       ensure_apt git golang-go
       clone "$repo" "$dir"
       ( cd "$dir" && go build -o "$dir/${id}" "./$arg" )
-      entry "$name" "$(printf '{"command": "%s/%s", "cwd": "%s", "trust": true}' "$dir" "$id" "$dir")"
-      have_docker || warn "$name runs its tools in Docker; install docker.io for them to work"
-      ;;
-    docker-sse) # server shipped as a Docker image, SSE on :arg (sudohakan/kali-mcp-server)
-      if ! have_docker; then
-        warn "$name needs Docker; install docker.io and rerun. Skipping for now."
-        continue
+      if [ -f "$dir/mcpwn.yaml" ] && [ -z "${LAI_MCPWN_DOCKER:-}" ]; then
+        ensure_apt python3 python3-yaml >/dev/null 2>&1 || true
+        if python3 -c "import yaml; p='$dir/mcpwn.yaml'; d=yaml.safe_load(open(p)); [t.pop('docker',None) for t in (d.get('tools') or [])]; yaml.safe_dump(d,open(p,'w'),sort_keys=False)" 2>/dev/null; then
+          say "$name: using native tools (stripped docker blocks; set LAI_MCPWN_DOCKER=1 to keep Docker)"
+        else
+          warn "$name: couldn't strip docker blocks (needs python3-yaml); its tools will use Docker"
+        fi
       fi
-      ensure_apt git
-      clone "$repo" "$dir"
-      say "building the $name Docker image (slow the first time)"
-      ( cd "$dir" && docker build -q -t "lai-$id" . ) >"$TOOLS_DIR/logs/$id-build.log" 2>&1 \
-        || { warn "$name: docker build failed (log: $TOOLS_DIR/logs/$id-build.log)"; continue; }
-      add_backend "$name" "http://127.0.0.1:$arg/sse" "docker run --rm -p $arg:$arg --name lai-$id lai-$id"
-      entry "$name" "$(printf '{"url": "http://127.0.0.1:%s/sse", "transport": "sse", "trust": true}' "$arg")"
+      entry "$name" "$(printf '{"command": "%s/%s", "cwd": "%s", "trust": true}' "$dir" "$id" "$dir")"
       ;;
   esac
 done
