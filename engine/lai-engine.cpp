@@ -6,7 +6,7 @@
 // Protocol, one JSON object per line:
 //   engine -> lai  {"ready":true,"ctx":N}                          once, after loading
 //   lai -> engine  {"messages":[...],"tools":[...],"temperature":T,"top_p":P,"top_k":K,
-//                   "min_p":M,"repeat_penalty":R,"max_tokens":N}   sampling keys optional
+//                   "min_p":M,"repeat_penalty":R,"max_tokens":N,"thinking":B}   all optional
 //                  messages and tools use the OpenAI chat format
 //   engine -> lai  {"think":"..."} / {"text":"..."}                  streamed deltas
 //                  {"done":{"content":"..","tool_calls":[{"id","name","arguments"}]},
@@ -130,6 +130,10 @@ struct engine {
         inputs.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
         inputs.add_generation_prompt = true;
         inputs.parallel_tool_calls   = true;
+        // models that reason before answering (Qwen3.5...) can skip it for speed
+        if (req.contains("thinking") && req.at("thinking").is_boolean()) {
+            inputs.enable_thinking = req.at("thinking").get<bool>();
+        }
 
         common_chat_session session(tmpls.get(), vocab, inputs);
         std::vector<llama_token> toks = tokenize(session.prompt());
@@ -290,7 +294,14 @@ static double kv_bytes_per_token(const llama_model * model, ggml_type kv) {
     if (v_len <= 0) {
         v_len = k_len;
     }
-    return (double) llama_model_n_layer(model) * llama_model_n_head_kv(model) * (k_len + v_len) * ((double) ggml_type_size(kv) / ggml_blck_size(kv));
+    // hybrid models (e.g. Qwen3.5) keep a KV cache only in their full-attention
+    // layers, one in every <interval>; the others hold a small fixed state
+    long n_attn = llama_model_n_layer(model);
+    long interval = meta_int(".full_attention_interval");
+    if (llama_model_is_hybrid(model) && interval > 1) {
+        n_attn = (n_attn + interval - 1) / interval;
+    }
+    return (double) n_attn * llama_model_n_head_kv(model) * (k_len + v_len) * ((double) ggml_type_size(kv) / ggml_blck_size(kv));
 }
 
 static bool kv_type(const std::string & s, ggml_type & out) {

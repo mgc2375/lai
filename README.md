@@ -93,7 +93,8 @@ MCP tools show up to the model as `server__tool`. With `auto_approve` off, they 
 | `threads` | 0 | CPU threads (0 = one per physical core) |
 | `engine` | | path to `lai-engine` if it isn't next to `lai` or on PATH |
 | `url` | | use this OpenAI-compatible server instead of `lai-engine` |
-| `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty` | llama.cpp defaults | sampling; for Qwen3-Coder use 0.7 / 0.8 / 20 / 0 / 1.05 |
+| `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty` | llama.cpp defaults | sampling; for Qwen3-Coder use 0.7 / 0.8 / 20 / 0 / 1.05, for Qwen3.5 0.6 / 0.95 / 20 / 0 / 1.0 (`install.sh` sets these per model) |
+| `thinking` | model default | `false` skips the reasoning step on models that have one (Qwen3.5, GLM): much faster replies on CPU, somewhat less careful |
 | `auto_approve` | true | run tools without asking. Set `false` to approve each command and file change (or toggle with `/yolo`) |
 | `command_timeout` | 120 | seconds per shell command |
 | `system_prompt` | | added to the built-in prompt. An `AGENTS.md` in the current directory is added too |

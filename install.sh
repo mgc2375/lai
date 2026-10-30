@@ -156,6 +156,14 @@ write_config() {
   [ "$kv" -gt 8192 ] && kv=8192
   [ "$kv" -lt 1024 ] && kv=1024
   case "$(basename "$model" | tr '[:upper:]' '[:lower:]')" in
+    # Qwen3.5 thinks by default; these are Qwen's settings for precise coding
+    *qwen3.5*|*qwen3_5*) sampling='
+  "temperature": 0.6,
+  "top_p": 0.95,
+  "top_k": 20,
+  "min_p": 0,
+  "repeat_penalty": 1.0,
+  "thinking": true,' ;;
     *qwen3*) sampling='
   "temperature": 0.7,
   "top_p": 0.8,

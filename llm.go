@@ -51,6 +51,7 @@ type LLM struct {
 	APIKey   string
 	Model    string
 	sampling map[string]any
+	thinking *bool
 	client   *http.Client
 }
 
@@ -64,7 +65,7 @@ func newLLM(base, key, model string, cfg *Config) *LLM {
 	if !strings.HasSuffix(base, "/v1") {
 		base += "/v1"
 	}
-	return &LLM{BaseURL: base, APIKey: key, Model: model, sampling: cfg.sampling(), client: &http.Client{}}
+	return &LLM{BaseURL: base, APIKey: key, Model: model, sampling: cfg.sampling(), thinking: cfg.Thinking, client: &http.Client{}}
 }
 
 type apiError struct {
@@ -152,6 +153,9 @@ func (l *LLM) Chat(ctx context.Context, msgs []Message, tools []ToolDef, emit fu
 	}
 	for k, v := range l.sampling {
 		payload[k] = v
+	}
+	if l.thinking != nil { // llama-server and vLLM read this; others ignore it
+		payload["chat_template_kwargs"] = map[string]any{"enable_thinking": *l.thinking}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

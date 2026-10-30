@@ -39,6 +39,7 @@ type Config struct {
 	TopK           *int                       `json:"top_k"`
 	MinP           *float64                   `json:"min_p"`
 	RepeatPenalty  *float64                   `json:"repeat_penalty"`
+	Thinking       *bool                      `json:"thinking"` // false skips the reasoning step on models that have one
 	MaxTokens      int                        `json:"max_tokens"`
 	SystemPrompt   string                     `json:"system_prompt"` // appended to the built-in prompt
 	AutoApprove    bool                       `json:"auto_approve"`

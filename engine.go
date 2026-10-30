@@ -34,6 +34,7 @@ type Engine struct {
 	Ctx      int
 	KVMB     int
 	sampling map[string]any
+	thinking *bool
 	mu       sync.Mutex
 	done     chan struct{}
 }
@@ -129,7 +130,7 @@ func startEngine(cfg *Config, model string) (*Engine, error) {
 		return nil, fmt.Errorf("starting %s: %w", bin, err)
 	}
 	e := &Engine{cmd: cmd, stdin: inW, out: bufio.NewReaderSize(outR, 64*1024), Log: logPath,
-		sampling: cfg.sampling(), done: make(chan struct{})}
+		sampling: cfg.sampling(), thinking: cfg.Thinking, done: make(chan struct{})}
 	go func() {
 		cmd.Wait()
 		logf.Close()
@@ -180,6 +181,9 @@ func (e *Engine) Chat(ctx context.Context, msgs []Message, tools []ToolDef, emit
 	}
 	for k, v := range e.sampling {
 		req[k] = v
+	}
+	if e.thinking != nil {
+		req["thinking"] = *e.thinking
 	}
 	b, err := json.Marshal(req)
 	if err != nil {
