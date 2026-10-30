@@ -471,6 +471,7 @@ main() {
         say "starting the memory guard (swap on a data disk, soft cap ${SOFT_CAP_GB:-29}G)"
       fi
       $SUDO env SWAP_DEV="${SWAP_DEV:-}" SWAP_DIR="$mg_dir" SWAP_SIZE="$mg_size" \
+        ZRAM="${ZRAM:-1}" ZRAM_SIZE="${ZRAM_SIZE:-}" ZRAM_ALGO="${ZRAM_ALGO:-lz4}" \
         SOFT_CAP_GB="${SOFT_CAP_GB:-29}" RAMP_START_GB="${RAMP_START_GB:-22}" IDLE_MIN="${IDLE_MIN:-8}" \
         setsid bash "$HERE/tools/memguard.sh" >"$dir/memguard.log" 2>&1 < /dev/null &
       echo "  memguard log: $dir/memguard.log  (stop it with: sudo pkill -f memguard.sh)"

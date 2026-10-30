@@ -2,7 +2,9 @@
 # memguard.sh — aggressive memory manager for running lai on a 32 GB live box.
 #
 # While it runs it:
-#   * adds swap on a data disk (SWAP_DEV, e.g. sdb) — a swap partition if one exists, else a swapfile on a Linux fs there,
+#   * sets up a two-tier swap: zram (compressed swap in RAM, fast, used first)
+#     plus a disk swapfile (SWAP_DEV/SWAP_DIR) as low-priority overflow, so most
+#     swapping stays in RAM and rarely touches the slow disk,
 #   * caps lai's process tree at a soft RAM limit (cgroup v2 memory.high) so the
 #     kernel pushes it to swap before the system runs out,
 #   * ramps vm.swappiness up as RAM fills (gentle under ~22 GB, maximal near the
@@ -13,7 +15,7 @@
 #   sudo LAI_PID=<pid of lai> tools/memguard.sh
 #
 # Tunables (env): SOFT_CAP_GB=29 RAMP_START_GB=22 IDLE_MIN=8 SWAP_SIZE=24G
-#   SWAP_DEV=sdb  SWAP_DIR=<a writable dir on that disk>  INTERVAL=10
+#   SWAP_DEV=sdb  SWAP_DIR=<dir on that disk>  ZRAM=0/1  ZRAM_SIZE=16G  ZRAM_ALGO=lz4  INTERVAL=10
 set -u
 
 SOFT_CAP_GB="${SOFT_CAP_GB:-29}"
@@ -33,10 +35,15 @@ CGROUP="/sys/fs/cgroup/lai.memguard"
 ORIG_SWAPPINESS="$(cat /proc/sys/vm/swappiness 2>/dev/null || echo 60)"
 ORIG_WATERMARK="$(cat /proc/sys/vm/watermark_scale_factor 2>/dev/null || echo 10)"
 
+ZRAM_DEV=""
 cleanup() {
   log "stopping; restoring settings"
   # turn our swapfile off but KEEP it, so the next run reuses it instead of rebuilding
   [ -n "$SWAPFILE" ] && swapoff "$SWAPFILE" 2>/dev/null || true
+  if [ -n "$ZRAM_DEV" ]; then
+    swapoff "$ZRAM_DEV" 2>/dev/null || true
+    echo 1 > "/sys/block/${ZRAM_DEV#/dev/}/reset" 2>/dev/null || true
+  fi
   echo "$ORIG_SWAPPINESS" > /proc/sys/vm/swappiness 2>/dev/null || true
   echo "$ORIG_WATERMARK" > /proc/sys/vm/watermark_scale_factor 2>/dev/null || true
   [ -d "$CGROUP" ] && rmdir "$CGROUP" 2>/dev/null || true
@@ -44,7 +51,36 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-# ---- swap on a disk (swapfile, or an existing swap partition) ----
+# ---- zram: compressed swap in RAM, used first (fast); the disk swapfile is
+#      only the overflow-of-overflow. Most swapping never touches the USB. ----
+setup_zram() {
+  [ "${ZRAM:-1}" = 1 ] || { log "zram disabled (ZRAM=0)"; return; }
+  if swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then
+    ZRAM_DEV="$(swapon --show=NAME --noheadings | grep '^/dev/zram' | head -1)"
+    log "zram swap already active: $ZRAM_DEV"; return
+  fi
+  modprobe zram 2>/dev/null || { log "no zram module; skipping (disk swap still used)"; return; }
+  local n dev
+  if command -v zramctl >/dev/null 2>&1 && dev="$(zramctl -f 2>/dev/null)"; then
+    n="${dev#/dev/zram}"
+  elif [ -w /sys/class/zram-control/hot_add ]; then
+    n="$(cat /sys/class/zram-control/hot_add 2>/dev/null)"
+  else
+    n=0
+  fi
+  [ -b "/dev/zram$n" ] || { log "no zram device"; return; }
+  local total_kb bytes
+  total_kb="$(awk '/MemTotal/{print $2}' /proc/meminfo)"
+  if [ -n "${ZRAM_SIZE:-}" ]; then bytes="$(numfmt --from=iec "$ZRAM_SIZE" 2>/dev/null)"; else bytes=$(( total_kb * 1024 / 2 )); fi
+  echo "${ZRAM_ALGO:-lz4}" > "/sys/block/zram$n/comp_algorithm" 2>/dev/null || true
+  if ! echo "$bytes" > "/sys/block/zram$n/disksize" 2>/dev/null; then log "couldn't size zram$n"; return; fi
+  mkswap "/dev/zram$n" >/dev/null 2>&1 || { log "mkswap zram failed"; return; }
+  swapon -p 100 "/dev/zram$n" 2>/dev/null || { log "swapon zram failed"; return; }
+  ZRAM_DEV="/dev/zram$n"
+  log "zram swap active: $ZRAM_DEV ($(numfmt --to=iec "$bytes" 2>/dev/null || echo "$bytes") ${ZRAM_ALGO:-lz4}, priority 100)"
+}
+
+# ---- disk swap (swapfile or partition): LOW priority, overflow only ----
 setup_swap() {
   # SWAP_DIR given (e.g. the persistence partition): put the swapfile right there
   if [ -n "${SWAP_DIR:-}" ]; then
@@ -53,7 +89,7 @@ setup_swap() {
       log "swapfile already active: $f"; return
     fi
     if [ -f "$f" ]; then                      # created on a previous boot: just turn it on
-      swapon "$f" 2>/dev/null && { log "reusing swapfile $f"; return; }
+      swapon -p 10 "$f" 2>/dev/null && { log "reusing swapfile $f"; return; }
     fi
     local fst; fst="$(findmnt -nro FSTYPE --target "$SWAP_DIR" 2>/dev/null)"
     case "$fst" in
@@ -71,7 +107,7 @@ setup_swap() {
   for swp in /dev/${SWAP_DEV}[0-9]*; do
     [ -b "$swp" ] || continue
     if [ "$(blkid -o value -s TYPE "$swp" 2>/dev/null)" = swap ]; then
-      swapon "$swp" 2>/dev/null && { log "swap on existing partition $swp"; return; }
+      swapon -p 10 "$swp" 2>/dev/null && { log "swap on existing partition $swp"; return; }
     fi
   done
   local dir="" fstype=""
@@ -115,7 +151,7 @@ make_swapfile() {
   fi
   chmod 600 "$SWAPFILE"
   mkswap "$SWAPFILE" >/dev/null 2>&1 || { log "mkswap failed"; rm -f "$SWAPFILE"; SWAPFILE=""; return; }
-  swapon "$SWAPFILE" 2>/dev/null || { log "swapon failed (filesystem may not support swapfiles; use a swap partition)"; rm -f "$SWAPFILE"; SWAPFILE=""; return; }
+  swapon -p 10 "$SWAPFILE" 2>/dev/null || { log "swapon failed (filesystem may not support swapfiles; use a swap partition)"; rm -f "$SWAPFILE"; SWAPFILE=""; return; }
   log "swap active on $SWAPFILE"
 }
 
@@ -153,6 +189,7 @@ engine_jiffies() { cat /proc/$(pgrep -x lai-engine | head -1)/stat 2>/dev/null |
 setup_sysctls() {
   echo 200 > /proc/sys/vm/watermark_scale_factor 2>/dev/null || true  # kswapd starts reclaiming sooner
   echo 150 > /proc/sys/vm/vfs_cache_pressure 2>/dev/null || true      # reclaim dentry/inode cache more
+  echo 0   > /proc/sys/vm/page-cluster 2>/dev/null || true            # 1 page per swap op: best for zram/flash latency
 }
 
 pick_swap_dev() {
@@ -174,7 +211,8 @@ main() {
     [ -n "$SWAP_DEV" ] || log "couldn't pick a swap disk; set SWAP_DEV=sdb or SWAP_DIR=<path>"
     log "start: soft cap ${SOFT_CAP_GB}G, ramp from ${RAMP_START_GB}G, idle cache drop after ${IDLE_MIN}m, swap on /dev/${SWAP_DEV:-none}"
   fi
-  setup_swap
+  setup_zram    # fast compressed RAM swap, used first
+  setup_swap    # disk swapfile, low priority: overflow only
   setup_cgroup
   setup_sysctls
   local last_busy_j last_busy_t now_j
