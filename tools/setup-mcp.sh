@@ -46,7 +46,7 @@ REGISTRY=(
   "shodan|mcp-shodan|@burtthecoder/mcp-shodan|npx|@burtthecoder/mcp-shodan"
   "bloodhound|sec-bloodhound-mcp|mwnickerson/bloodhound_mcp|uvx|bloodhound-mcp"
   "mcpwn|mcpwn|https://gitlab.com/parrotsec/project/mcpwn.git|go|cmd/mcpwn"
-  "kali-sudohakan|kali-mcp-sudohakan|sudohakan/kali-mcp-server|docker-sse|8000"
+  "kali-sudohakan|kali-mcp-sudohakan|sudohakan/kali-mcp-server|py-module|kali_mcp_server"
   "capmonster|capmonster-mcp|capmonster-mcp|uvx-pkg|capmonster-mcp"
   "browser|stealth-browser-mcp|browserstealthmcp|uvx-pkg|browserstealthmcp"
   "captcha-free|captcha-free|-|local-py|captcha-free/server.py"
@@ -144,6 +144,22 @@ for e in "${REGISTRY[@]}"; do
       ensure_apt git python3 python3-venv python3-pip
       clone "$repo" "$dir"; py_venv "$dir"
       entry "$name" "$(printf '{"command": "%s/.venv/bin/python", "args": ["%s/%s"], "trust": true}' "$dir" "$dir" "$arg")"
+      ;;
+    py-module) # installable python package run as `python -m <module> --transport stdio`,
+               # shelling out to the host's native tools (no Docker). arg = module
+      ensure_apt git python3 python3-venv python3-pip
+      clone "$repo" "$dir"
+      [ -x "$dir/.venv/bin/python" ] || python3 -m venv "$dir/.venv"
+      "$dir/.venv/bin/pip" install -q --upgrade pip >/dev/null 2>&1 || true
+      if [ -f "$dir/pyproject.toml" ] || [ -f "$dir/setup.py" ]; then
+        "$dir/.venv/bin/pip" install -q -e "$dir"
+      elif [ -f "$dir/requirements.txt" ]; then
+        "$dir/.venv/bin/pip" install -q -r "$dir/requirements.txt"
+      fi
+      entry "$name" "$(printf '{"command": "%s/.venv/bin/python", "args": ["-m", "%s", "--transport", "stdio"], "cwd": "%s", "trust": true}' "$dir" "$arg" "$dir")"
+      if [ "$id" = kali-sudohakan ]; then
+        warn "$name runs tools natively on Parrot (no Docker). Install any it needs with apt, e.g.: sudo apt install nmap nikto sqlmap gobuster ffuf feroxbuster nuclei subfinder amass wpscan crackmapexec evil-winrm responder metasploit-framework"
+      fi
       ;;
     py-installer) # repo ships its own install.sh creating venv/; stdio entry = arg
       ensure_apt git python3 python3-venv python3-pip
