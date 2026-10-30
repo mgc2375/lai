@@ -7,6 +7,8 @@
 #   ./install.sh --serve           ...then start the phone page (lai serve)
 #   ./install.sh --mcp             ...also clone & set up the pentest MCP servers
 #                                  (hexstrike, kali, impacket, pentester, bloodhound)
+#   ./install.sh --memguard        ...also run the memory guard (swap on the SSD +
+#                                  soft RAM cap); tune with SWAP_DEV/SOFT_CAP_GB/etc
 #
 #   NGROK_AUTHTOKEN=... NGROK_DOMAIN=name.ngrok-free.dev ./install.sh --serve
 #                                  use another ngrok account (defaults below;
@@ -45,12 +47,34 @@ say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
-# LAI_PERSIST: one folder (on a real drive) for the binaries, model and config,
-# so a live boot finds everything ready next time.
+# mount_persist DEV: mount a persistence partition (e.g. /dev/sdc3) read-write
+# and echo its mountpoint. If already mounted, reuses that.
+mount_persist() {
+  local dev="$1" mp
+  [ -b "$dev" ] || { echo ""; return 1; }
+  mp="$(findmnt -nro TARGET --source "$dev" 2>/dev/null | head -1)"
+  if [ -z "$mp" ]; then
+    mp="/mnt/lai-persist"
+    ${SUDO:-sudo} mkdir -p "$mp" 2>/dev/null
+    ${SUDO:-sudo} mount "$dev" "$mp" 2>/dev/null || { echo ""; return 1; }
+  fi
+  echo "$mp"
+}
+
+# LAI_PERSIST: where the binaries, engine, MCP tools and config live so a live
+# boot finds them ready. The model stays in RAM (re-downloaded each boot) unless
+# you also set LAI_MODEL_DIR. LAI_PERSIST may be a folder OR a block device
+# (e.g. /dev/sdc3), which is mounted first.
 if [ -n "${LAI_PERSIST:-}" ]; then
-  mkdir -p "$LAI_PERSIST" || die "can't create LAI_PERSIST=$LAI_PERSIST"
-  : "${LAI_DIR:=$LAI_PERSIST}"
-  : "${LAI_MODEL_DIR:=$LAI_PERSIST/models}"
+  SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO=sudo
+  if [ -b "$LAI_PERSIST" ]; then
+    _mp="$(mount_persist "$LAI_PERSIST")" || die "couldn't mount $LAI_PERSIST"
+    [ -n "$_mp" ] || die "couldn't mount $LAI_PERSIST"
+    LAI_PERSIST="$_mp/lai"
+  fi
+  mkdir -p "$LAI_PERSIST" || die "can't create $LAI_PERSIST"
+  : "${LAI_DIR:=$LAI_PERSIST}"          # binaries, engine, mcp-tools, config -> persistent drive
+  : "${LAI_MODEL_DIR:=$HOME/models}"     # model -> RAM (home); set LAI_MODEL_DIR to keep it on disk
 fi
 
 file_mb() { echo $(( $(wc -c < "$1") / 1048576 )); }
@@ -293,17 +317,19 @@ main() {
   [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
   # 1. model
-  local model="" serve=0 find=0 setup_mcp=0 a
+  local model="" serve=0 find=0 setup_mcp=0 memguard=0 a
   for a in "$@"; do
     case "$a" in
       --serve) serve=1 ;;
       --find)  find=1 ;;
       --mcp)   setup_mcp=1 ;;
+      --memguard) memguard=1 ;;
       -*) die "unknown option $a" ;;
       *) model="$a" ;;
     esac
   done
   [ -n "${LAI_SETUP_MCP:-}" ] && setup_mcp=1
+  [ -n "${LAI_MEMGUARD:-}" ] && memguard=1
   local dir_default="$HERE"
   if [ -n "$model" ]; then
     dir_default="$(dirname "$model")/lai"
@@ -428,6 +454,19 @@ main() {
     mkdir -p "$HOME/.local/bin"
     ln -sf "$dir/lai" "$HOME/.local/bin/lai"
     [ -x "$dir/ngrok" ] && ln -sf "$dir/ngrok" "$HOME/.local/bin/ngrok"
+  fi
+
+  # memory guard: swap on the SSD + soft RAM cap, running in the background
+  if [ "$memguard" = 1 ]; then
+    if [ -f "$HERE/tools/memguard.sh" ]; then
+      say "starting the memory guard (swap on /dev/${SWAP_DEV:-sda}, soft cap ${SOFT_CAP_GB:-29}G)"
+      $SUDO env SWAP_DEV="${SWAP_DEV:-sda}" SOFT_CAP_GB="${SOFT_CAP_GB:-29}" \
+        RAMP_START_GB="${RAMP_START_GB:-22}" IDLE_MIN="${IDLE_MIN:-8}" SWAP_SIZE="${SWAP_SIZE:-24G}" \
+        setsid bash "$HERE/tools/memguard.sh" >"$dir/memguard.log" 2>&1 < /dev/null &
+      echo "  memguard log: $dir/memguard.log  (stop it with: sudo pkill -f memguard.sh)"
+    else
+      warn "tools/memguard.sh missing; skipping the memory guard"
+    fi
   fi
 
   echo

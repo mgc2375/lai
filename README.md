@@ -31,6 +31,16 @@ git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
   LAI_PERSIST=/run/live/persistence/<partition>/lai ./install.sh --serve --mcp
 ```
 
+**Split storage + memory guard (your setup: tools on the SSD partition, model in RAM, aggressive swap):**
+
+```sh
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
+  LAI_PERSIST=/dev/sdc3 SWAP_DEV=sda ./install.sh --serve --mcp --memguard
+```
+
+- `LAI_PERSIST=/dev/sdc3` mounts that partition and keeps the binaries, engine, **all MCP tools** and config there, so nothing re-clones or rebuilds next boot. The **model stays in RAM** (re-downloaded each boot; set `LAI_MODEL_DIR` to keep it on disk too).
+- `--memguard` runs `tools/memguard.sh` (root) while lai runs: it adds a swapfile on the SSD (`SWAP_DEV=sda`), ramps `vm.swappiness` up as RAM fills (gentle under 22 GB → maximal by 29 GB), caps lai's whole process tree at a 29 GB soft limit via cgroup `memory.high` so the kernel pushes it to swap before the box runs out, makes the kernel reclaim earlier, and drops clean page cache after 8 min idle. Tune with `SOFT_CAP_GB=29 RAMP_START_GB=22 IDLE_MIN=8 SWAP_SIZE=24G`. Stop it with `sudo pkill -f memguard.sh`.
+
 **Already have `~/lai`?** Update and rerun:
 
 ```sh
@@ -45,7 +55,7 @@ What it does, skipping anything already done:
 4. **`--mcp`:** clones, builds and registers every MCP server in the registry (see below) and starts their backends.
 5. **ngrok + `--serve`:** installs ngrok, saves the authtoken, starts the tunnel and prints the phone login link. (Comes set up with a test ngrok account; override with `NGROK_AUTHTOKEN=` / `NGROK_DOMAIN=`, or drop `--serve` to stay terminal-only.)
 
-Leave off `--mcp` for just the agent, or `--serve` for terminal-only. Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP` (import an existing OpenCode/Claude config too), `LAI_PERSIST`, `LAI_MCP_ONLY=hexstrike,kali,…`, `LAI_GPU=cpu|vulkan|cuda|rocm`.
+Leave off `--mcp` for just the agent, or `--serve` for terminal-only. Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP` (import an existing OpenCode/Claude config too), `LAI_PERSIST`, `LAI_MCP_ONLY=hexstrike,kali,…`, `--memguard` (+ `SWAP_DEV`, `SOFT_CAP_GB`, `RAMP_START_GB`, `IDLE_MIN`, `SWAP_SIZE`), `LAI_GPU=cpu|vulkan|cuda|rocm`.
 
 ## Use
 
