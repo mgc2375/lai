@@ -7,7 +7,8 @@
 #   ./install.sh --serve           ...then start the phone page (lai serve)
 #
 #   NGROK_AUTHTOKEN=... NGROK_DOMAIN=name.ngrok-free.dev ./install.sh --serve
-#                                  also install ngrok and put the page online
+#                                  use another ngrok account (defaults below;
+#                                  NGROK_AUTHTOKEN= NGROK_DOMAIN= skips ngrok)
 #
 # Re-running skips whatever is already done (download, build, config).
 #
@@ -18,6 +19,9 @@ set -euo pipefail
 # lai-engine uses llama.cpp's internal chat helpers, which change between
 # versions, so it is built against this tested tag.
 LLAMA_TAG="${LLAMA_TAG:-b11982}"
+# test ngrok account for the phone page (set NGROK_AUTHTOKEN= to skip ngrok)
+NGROK_AUTHTOKEN="${NGROK_AUTHTOKEN-3KlWECINqX6TREUEicydo49Fdca_7Y3tYCMbphn5brHqKEsqh}"
+NGROK_DOMAIN="${NGROK_DOMAIN-sasquatch-ducking-revered.ngrok-free.dev}"
 # small, abliterated, strong at code and tool calls (see README)
 LAI_MODEL_URL="${LAI_MODEL_URL:-https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-9B-abliterated.Q6_K.gguf}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

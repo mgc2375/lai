@@ -12,11 +12,10 @@ Each weight exists once: the model file is memory-mapped and computed on in plac
 One command does everything: clone, download the model, build, configure, set up ngrok and start the phone page.
 
 ```sh
-git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
-  NGROK_AUTHTOKEN=<your token> NGROK_DOMAIN=<name>.ngrok-free.dev ./install.sh --serve
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && ./install.sh --serve
 ```
 
-Leave out the two `NGROK_` settings and `--serve` for terminal-only use (`./install.sh`, then `lai`).
+The installer comes set up with a test ngrok account. Use your own with `NGROK_AUTHTOKEN=<token> NGROK_DOMAIN=<name>.ngrok-free.dev ./install.sh --serve`, or skip ngrok with `NGROK_AUTHTOKEN= NGROK_DOMAIN= ./install.sh` (then run `lai` in the terminal).
 
 What `install.sh` does, skipping anything already done:
 
@@ -27,7 +26,7 @@ What `install.sh` does, skipping anything already done:
 5. **ngrok:** installs the agent and saves your authtoken (only when `NGROK_AUTHTOKEN` / `NGROK_DOMAIN` are set). `lai serve` then starts the tunnel itself.
 6. **`--serve`:** starts the phone page and prints its login link.
 
-Your token is passed on the command line, so it never goes into the repo. On a live boot everything lives in RAM: run the same command after each reboot. To keep the model and build between boots, point `LAI_MODEL_DIR` and `LAI_DIR` at a persistent drive.
+On a live boot everything lives in RAM: run the same command after each reboot. To keep the model and build between boots, point `LAI_MODEL_DIR` and `LAI_DIR` at a persistent drive.
 
 Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_GPU=cpu|vulkan|cuda|rocm`.
 
