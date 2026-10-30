@@ -10,6 +10,10 @@
 #   ./install.sh --memguard        ...also run the memory guard (swap + soft RAM cap).
 #                                  LAI_PERSIST_SWAP=11G puts the swapfile on the
 #                                  persistence partition (reserved once, reused each boot)
+#   ./install.sh --tools           ...install the CLI tools the MCP servers call
+#                                  (skips what Parrot has; shims the rest on-demand)
+#   LAI_DISK=sdc ./install.sh ...   carve lai-data (10G ext4) + lai-swap (11G) out of
+#                                  that disk's free space (detected+reused next boot)
 #
 #   NGROK_AUTHTOKEN=... NGROK_DOMAIN=name.ngrok-free.dev ./install.sh --serve
 #                                  use another ngrok account (defaults below;
@@ -319,17 +323,36 @@ main() {
   [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
   # 1. model
-  local model="" serve=0 find=0 setup_mcp=0 memguard=0 a
+  local model="" serve=0 find=0 setup_mcp=0 memguard=0 do_tools=0 a
   for a in "$@"; do
     case "$a" in
       --serve) serve=1 ;;
       --find)  find=1 ;;
       --mcp)   setup_mcp=1 ;;
       --memguard) memguard=1 ;;
+      --tools) do_tools=1 ;;
       -*) die "unknown option $a" ;;
       *) model="$a" ;;
     esac
   done
+  [ -n "${LAI_SETUP_TOOLS:-}" ] && do_tools=1
+
+  # 0. optional: carve lai-data + lai-swap partitions out of a disk's free space
+  #    (LAI_DISK=sdc). Detected and reused on later boots; model stays in RAM.
+  if [ -n "${LAI_DISK:-}" ] && [ -f "$HERE/tools/setup-disk.sh" ]; then
+    say "setting up partitions on /dev/${LAI_DISK#/dev/} (${LAI_DATA_SIZE:-10G} data + ${LAI_SWAP_SIZE:-11G} swap)"
+    local _disk_out
+    _disk_out="$($SUDO env LAI_DISK_YES="${LAI_DISK_YES:-}" bash "$HERE/tools/setup-disk.sh" \
+                  "$LAI_DISK" "${LAI_DATA_SIZE:-10G}" "${LAI_SWAP_SIZE:-11G}" | tail -2)"
+    local _dm _sw
+    _dm="$(printf '%s\n' "$_disk_out" | sed -n 's/^LAI_DATA_MOUNT=//p')"
+    _sw="$(printf '%s\n' "$_disk_out" | sed -n 's/^LAI_SWAP_DEV=//p')"
+    [ -n "$_dm" ] || die "disk setup didn't return a data mount (see output above)"
+    : "${LAI_DIR:=$_dm/lai}"
+    : "${LAI_MODEL_DIR:=$HOME/models}"     # model in RAM
+    SWAP_DEV="${SWAP_DEV:-${LAI_DISK#/dev/}}"   # memguard keeps lai-swap active (zram on top)
+    say "data partition mounted at $_dm; swap on $_sw"
+  fi
   [ -n "${LAI_SETUP_MCP:-}" ] && setup_mcp=1
   [ -n "${LAI_MEMGUARD:-}" ] && memguard=1
   local dir_default="$HERE"
@@ -436,6 +459,24 @@ main() {
   if [ -n "$mcpsrc" ] && [ -f "$mcpsrc" ]; then
     say "importing MCP servers from $mcpsrc"
     "$dir/lai" mcp import "$mcpsrc" || warn "couldn't import MCP servers from $mcpsrc"
+  fi
+
+  # 6d. with --tools, install the CLI tools the MCP servers call (skip what
+  #     Parrot already has + GUI wrappers; shim the rest for on-demand install)
+  local shim_dir=""
+  if [ "$do_tools" = 1 ] && [ -f "$HERE/tools/setup-tools.sh" ]; then
+    say "checking the tools the MCP servers need (installing missing core ones)"
+    local _tout
+    _tout="$($SUDO -E env TOOLS_DIR="$tools_dir" bash "$HERE/tools/setup-tools.sh" | tail -2 || true)"
+    shim_dir="$(printf '%s\n' "$_tout" | sed -n 's/^SHIM_DIR=//p')"
+    if [ -n "$shim_dir" ]; then
+      # put the shim dir at the END of PATH for this session and future shells,
+      # so a real tool wins and only missing ones trigger an on-demand install
+      case ":$PATH:" in *":$shim_dir:"*) ;; *) export PATH="$PATH:$shim_dir" ;; esac
+      local prof="$HOME/.bashrc"
+      grep -qF "$shim_dir" "$prof" 2>/dev/null || echo "export PATH=\"\$PATH:$shim_dir\"" >> "$prof"
+      say "on-demand tool shims: $shim_dir (added to PATH)"
+    fi
   fi
 
   # 7. ngrok, when a token or domain was given

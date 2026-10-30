@@ -49,6 +49,19 @@ git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
 
   A swap partition lives on the physical disk, so it persists across reboots; memguard reactivates it automatically after that.
 
+**Full auto setup (your box: carve the unused space on `sdc` into partitions, install tools):**
+
+```sh
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
+  LAI_DISK=sdc ./install.sh --serve --mcp --memguard --tools
+```
+
+- `LAI_DISK=sdc` carves **lai-data (10 GB ext4)** + **lai-swap (11 GB)** out of `sdc`'s *unallocated free space* (`tools/setup-disk.sh`, GPT, sgdisk) — safe because it only uses free space and never touches your live-boot/overlay partitions. On later boots it detects the existing `lai-data`/`lai-swap` by label and just mounts/activates them. Sizes: `LAI_DATA_SIZE`/`LAI_SWAP_SIZE`. Skip the confirmation prompt with `LAI_DISK_YES=1`.
+- lai's tools/config live on `lai-data`; the model stays in RAM; swap is the real `lai-swap` partition (with zram in front, per `--memguard`).
+- `--tools` checks the ~130 tools the MCP servers can call, installs ~30 common ones that Parrot doesn't already ship (caching `.deb`s on `lai-data` for fast reboots), skips GUI-only wrappers, and drops an **on-demand shim** for the rest — the first time the model calls a missing tool, the shim installs it and runs it. Shims go at the end of PATH, so real tools always win.
+
+**Persistence + swap on one partition
+
 **Persistence + swap on one partition (your 21 GB `sdc3`: ~10 GB tools, ~11 GB swap):**
 
 ```sh
