@@ -47,6 +47,7 @@ REGISTRY=(
   "bloodhound|sec-bloodhound-mcp|mwnickerson/bloodhound_mcp|uvx|bloodhound-mcp"
   "mcpwn|mcpwn|https://gitlab.com/parrotsec/project/mcpwn.git|go|cmd/mcpwn"
   "kali-sudohakan|kali-mcp-sudohakan|sudohakan/kali-mcp-server|docker-sse|8000"
+  "capmonster|capmonster-mcp|capmonster-mcp|uvx-pkg|capmonster-mcp"
 )
 
 # scanners: MCP vulnerability scanners — CLI tools you run AGAINST an MCP
@@ -175,6 +176,15 @@ for e in "${REGISTRY[@]}"; do
         entry "$name" "$(printf '{"command": "npx", "args": ["-y", "%s"], "env": {"SHODAN_API_KEY": "${SHODAN_API_KEY}"}, "trust": true}' "$arg")"
       else
         entry "$name" "$(printf '{"command": "npx", "args": ["-y", "%s"], "trust": true}' "$arg")"
+      fi
+      ;;
+    uvx-pkg) # published pypi package, run with uvx; arg = package
+      ensure_uv
+      if [ "$id" = capmonster ]; then
+        entry "$name" "$(printf '{"command": "uvx", "args": ["%s"], "env": {"CM_API_KEY": "${CM_API_KEY}"}, "trust": true}' "$arg")"
+        warn "$name needs CM_API_KEY (your CapMonster Cloud key) set to connect"
+      else
+        entry "$name" "$(printf '{"command": "uvx", "args": ["%s"], "trust": true}' "$arg")"
       fi
       ;;
     uvx) # run straight from git with uv; needs the user's own credentials
