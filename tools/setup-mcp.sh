@@ -10,34 +10,41 @@
 # (Claude Desktop format, for `lai mcp import`) pointing at the clone paths,
 # and writes start-backends.sh for the servers that need a background service.
 #
-# Servers that need your own credentials (e.g. BloodHound tokens) are written
-# with ${ENV_VAR} placeholders — set those vars before running lai.
+# Servers that need your own key/credentials (Shodan, BloodHound) are written
+# with ${ENV_VAR} placeholders and enabled; set those vars before running lai
+# and they connect. Everything else works without keys.
 set -euo pipefail
 
 TOOLS_DIR="${TOOLS_DIR:-$HOME/.local/share/lai/mcp-tools}"
 ONLY=""
 LIST=0
-for a in "$@"; do
-  case "$a" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --list) LIST=1 ;;
-    --only) shift; ONLY="${1:-}" ;;
-    --only=*) ONLY="${a#--only=}" ;;
+    --only) ONLY="${2:-}"; shift ;;
+    --only=*) ONLY="${1#--only=}" ;;
   esac
-  shift || true
+  shift
 done
 
 say()  { printf '\033[1m  ->\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m  warning:\033[0m %s\n' "$*" >&2; }
 SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
-# registry: id | display name | repo | runtime | backend port (— = none)
-# runtime tells setup how to build and how to launch it.
+# registry: id | display name | repo | runtime | arg
+#   arg is the port (py-backend/py-kali), entry file (py-server/node),
+#   console script (py-editable) or npm package (npx).
 REGISTRY=(
   "hexstrike|hexstrike-ai|0x4m4/hexstrike-ai|py-backend|8888"
   "kali|mcp-kali-server|Wh0am123/MCP-Kali-Server|py-kali|5000"
-  "impacket|sec-impacket-mcp|schwarztim/sec-impacket-mcp|node|—"
-  "pentester|pentester-mcp|halilkirazkaya/pentester-mcp|py-server|—"
-  "bloodhound|sec-bloodhound-mcp|mwnickerson/bloodhound_mcp|uvx|—"
+  "impacket|sec-impacket-mcp|schwarztim/sec-impacket-mcp|node|dist/index.js"
+  "pentester|pentester-mcp|halilkirazkaya/pentester-mcp|py-server|server.py"
+  "pentestmcp|pentestmcp|dev-lu/PentestMCP|py-server|pentest_mcp.py"
+  "adstrike|adstrike|capture0x/AdStrike|py-installer|mcp_server.py"
+  "adagent|adagent|capture0x/AdAgent|py-installer|mcp_server.py"
+  "cve|mcp-cve-project|mukul975/cve-mcp-server|py-editable|cve-mcp"
+  "shodan|mcp-shodan|@burtthecoder/mcp-shodan|npx|@burtthecoder/mcp-shodan"
+  "bloodhound|sec-bloodhound-mcp|mwnickerson/bloodhound_mcp|uvx|bloodhound-mcp"
 )
 
 if [ "$LIST" = 1 ]; then
@@ -56,7 +63,15 @@ ensure_apt() { # ensure_apt pkg...
   $SUDO apt-get update -qq && $SUDO apt-get install -y -qq "${miss[@]}" && $SUDO apt-get clean
 }
 
-clone() { # clone repo dest
+have_uv() { command -v uvx >/dev/null 2>&1; }
+ensure_uv() {
+  have_uv && return 0
+  say "installing uv"
+  curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || true
+  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+}
+
+clone() { # clone repo dest  (repo is owner/name on GitHub)
   if [ -d "$2/.git" ]; then
     git -C "$2" pull -q --ff-only || warn "$2: pull failed, using the existing checkout"
   else
@@ -77,8 +92,7 @@ mkdir -p "$TOOLS_DIR/logs"
 OUT="$TOOLS_DIR/mcp-servers.json"
 BACK="$TOOLS_DIR/start-backends.sh"
 entries=()                                   # JSON objects, joined at the end
-: > "$BACK.tmp"
-printf '#!/usr/bin/env bash\n# starts the MCP backends that need a running service; safe to re-run\nset -u\nLOGS="%s/logs"\nup(){ curl -fsS -o /dev/null --max-time 2 "$1" 2>/dev/null; }\n' "$TOOLS_DIR" >> "$BACK.tmp"
+printf '#!/usr/bin/env bash\n# starts the MCP backends that need a running service; safe to re-run\nset -u\nLOGS="%s/logs"\nup(){ curl -fsS -o /dev/null --max-time 2 "$1" 2>/dev/null; }\n' "$TOOLS_DIR" > "$BACK.tmp"
 
 add_backend() { # add_backend name healthurl cmd...
   local name="$1" url="$2"; shift 2
@@ -89,40 +103,71 @@ add_backend() { # add_backend name healthurl cmd...
   } >> "$BACK.tmp"
 }
 
+# entry NAME JSON  — add a server entry
+entry() { entries+=("$(printf '"%s": %s' "$1" "$2")"); }
+
 for e in "${REGISTRY[@]}"; do
-  IFS='|' read -r id name repo runtime port <<< "$e"
+  IFS='|' read -r id name repo runtime arg <<< "$e"
   want "$id" || continue
   dir="$TOOLS_DIR/$id"
   say "$name ($repo)"
   case "$runtime" in
-    py-backend) # hexstrike: backend server + stdio mcp client
+    py-backend) # hexstrike: backend server on :arg + stdio mcp client
       ensure_apt git python3 python3-venv python3-pip curl
       clone "$repo" "$dir"; py_venv "$dir"
-      add_backend "$name" "http://127.0.0.1:$port/health" "cd '$dir' && '$dir/.venv/bin/python' hexstrike_server.py --port $port"
-      entries+=("$(printf '"%s": {"command": "%s/.venv/bin/python", "args": ["%s/hexstrike_mcp.py", "--server", "http://127.0.0.1:%s"], "trust": true}' "$name" "$dir" "$dir" "$port")")
+      add_backend "$name" "http://127.0.0.1:$arg/health" "cd '$dir' && '$dir/.venv/bin/python' hexstrike_server.py --port $arg"
+      entry "$name" "$(printf '{"command": "%s/.venv/bin/python", "args": ["%s/hexstrike_mcp.py", "--server", "http://127.0.0.1:%s"], "trust": true}' "$dir" "$dir" "$arg")"
       ;;
-    py-kali) # kali: command-exec backend + client.py stdio
+    py-kali) # kali: command-exec backend on :arg + client.py stdio
       ensure_apt git python3 python3-venv python3-pip curl
       clone "$repo" "$dir"; py_venv "$dir"
-      add_backend "$name" "http://127.0.0.1:$port/health" "cd '$dir' && '$dir/.venv/bin/python' server.py --port $port"
-      entries+=("$(printf '"%s": {"command": "%s/.venv/bin/python", "args": ["%s/client.py", "--server", "http://127.0.0.1:%s"], "trust": true}' "$name" "$dir" "$dir" "$port")")
+      add_backend "$name" "http://127.0.0.1:$arg/health" "cd '$dir' && '$dir/.venv/bin/python' server.py --port $arg"
+      entry "$name" "$(printf '{"command": "%s/.venv/bin/python", "args": ["%s/client.py", "--server", "http://127.0.0.1:%s"], "trust": true}' "$dir" "$dir" "$arg")"
       ;;
-    py-server) # single python stdio server
+    py-server) # single python stdio server, entrypoint = arg
       ensure_apt git python3 python3-venv python3-pip
       clone "$repo" "$dir"; py_venv "$dir"
-      entries+=("$(printf '"%s": {"command": "%s/.venv/bin/python", "args": ["%s/server.py"], "trust": true}' "$name" "$dir" "$dir")")
+      entry "$name" "$(printf '{"command": "%s/.venv/bin/python", "args": ["%s/%s"], "trust": true}' "$dir" "$dir" "$arg")"
       ;;
-    node) # node stdio server, built with npm
+    py-installer) # repo ships its own install.sh creating venv/; stdio entry = arg
+      ensure_apt git python3 python3-venv python3-pip
+      clone "$repo" "$dir"
+      if [ -f "$dir/install.sh" ]; then
+        ( cd "$dir" && bash install.sh </dev/null ) >"$TOOLS_DIR/logs/$id-install.log" 2>&1 \
+          || warn "$name: its install.sh failed (log: $TOOLS_DIR/logs/$id-install.log); trying a plain venv"
+      fi
+      [ -x "$dir/venv/bin/python3" ] || { python3 -m venv "$dir/venv"; [ -f "$dir/requirements.txt" ] && "$dir/venv/bin/pip" install -q -r "$dir/requirements.txt"; }
+      entry "$name" "$(printf '{"command": "%s/venv/bin/python3", "args": ["%s/%s"], "trust": true}' "$dir" "$dir" "$arg")"
+      ;;
+    node) # node stdio server, built with npm; entry = arg
       ensure_apt git nodejs npm
       clone "$repo" "$dir"
       ( cd "$dir" && npm install -s && npm run -s build )
-      entries+=("$(printf '"%s": {"command": "node", "args": ["%s/dist/index.js"], "trust": true}' "$name" "$dir")")
+      entry "$name" "$(printf '{"command": "node", "args": ["%s/%s"], "trust": true}' "$dir" "$arg")"
+      ;;
+    py-editable) # pip install -e . ; stdio via console script = arg
+      ensure_apt git python3 python3-venv python3-pip
+      clone "$repo" "$dir"
+      [ -x "$dir/.venv/bin/python" ] || python3 -m venv "$dir/.venv"
+      "$dir/.venv/bin/pip" install -q -e "$dir"
+      if [ "$id" = cve ]; then
+        entry "$name" "$(printf '{"command": "%s/.venv/bin/%s", "args": [], "env": {"SHODAN_API_KEY": "${SHODAN_API_KEY}", "VIRUSTOTAL_API_KEY": "${VIRUSTOTAL_API_KEY}"}, "trust": true}' "$dir" "$arg")"
+      else
+        entry "$name" "$(printf '{"command": "%s/.venv/bin/%s", "args": [], "trust": true}' "$dir" "$arg")"
+      fi
+      ;;
+    npx) # published npm package, run with npx; arg = package
+      ensure_apt nodejs npm
+      if [ "$id" = shodan ]; then
+        entry "$name" "$(printf '{"command": "npx", "args": ["-y", "%s"], "env": {"SHODAN_API_KEY": "${SHODAN_API_KEY}"}, "trust": true}' "$arg")"
+      else
+        entry "$name" "$(printf '{"command": "npx", "args": ["-y", "%s"], "trust": true}' "$arg")"
+      fi
       ;;
     uvx) # run straight from git with uv; needs the user's own credentials
-      command -v uvx >/dev/null 2>&1 || ensure_apt pipx >/dev/null 2>&1 || true
-      command -v uvx >/dev/null 2>&1 || { curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || warn "install uv to use $name"; }
-      entries+=("$(printf '"%s": {"command": "uvx", "args": ["--from", "git+https://github.com/%s", "bloodhound-mcp"], "env": {"BLOODHOUND_DOMAIN": "${BLOODHOUND_DOMAIN}", "BLOODHOUND_TOKEN_ID": "${BLOODHOUND_TOKEN_ID}", "BLOODHOUND_TOKEN_KEY": "${BLOODHOUND_TOKEN_KEY}"}, "disabled": true, "trust": true}' "$name" "$repo")")
-      warn "$name needs BLOODHOUND_DOMAIN / BLOODHOUND_TOKEN_ID / BLOODHOUND_TOKEN_KEY; it's left disabled until you set them and enable it in the config"
+      ensure_uv
+      entry "$name" "$(printf '{"command": "uvx", "args": ["--from", "git+https://github.com/%s", "%s"], "env": {"BLOODHOUND_DOMAIN": "${BLOODHOUND_DOMAIN}", "BLOODHOUND_TOKEN_ID": "${BLOODHOUND_TOKEN_ID}", "BLOODHOUND_TOKEN_KEY": "${BLOODHOUND_TOKEN_KEY}"}, "trust": true}' "$repo" "$arg")"
+      warn "$name needs BLOODHOUND_DOMAIN / BLOODHOUND_TOKEN_ID / BLOODHOUND_TOKEN_KEY set to connect"
       ;;
   esac
 done

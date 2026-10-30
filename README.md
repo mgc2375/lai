@@ -117,9 +117,14 @@ lai mcp import ~/.config/opencode/opencode.json   # or a claude_desktop_config.j
 | mcp-kali-server | Wh0am123/MCP-Kali-Server | command-exec backend on :5000 |
 | sec-impacket-mcp | schwarztim/sec-impacket-mcp | node build |
 | pentester-mcp | halilkirazkaya/pentester-mcp | ~235 tool wrappers |
-| sec-bloodhound-mcp | mwnickerson/bloodhound_mcp | left disabled until you set `BLOODHOUND_DOMAIN`/`TOKEN_ID`/`TOKEN_KEY` |
+| pentestmcp | dev-lu/PentestMCP | Kali tools over MCP |
+| adstrike | capture0x/AdStrike | AD red-team framework (runs its own install.sh) |
+| adagent | capture0x/AdAgent | AD attack agent, 53 tools |
+| mcp-cve-project | mukul975/cve-mcp-server | CVE/threat intel; optional `SHODAN_API_KEY`/`VIRUSTOTAL_API_KEY` |
+| mcp-shodan | @burtthecoder/mcp-shodan | needs `SHODAN_API_KEY` |
+| sec-bloodhound-mcp | mwnickerson/bloodhound_mcp | needs `BLOODHOUND_DOMAIN`/`TOKEN_ID`/`TOKEN_KEY` |
 
-They install into `<lai dir>/mcp-tools` (keep that on your persistence partition so they survive a reboot). Backends are (re)started on every `install.sh` run. Pick a subset with `LAI_MCP_ONLY=hexstrike,kali`, list them with `tools/setup-mcp.sh --list`, or add your own by editing the registry at the top of `tools/setup-mcp.sh`. Servers that aren't in this set — or that need your own credentials — still come across via the OpenCode/Claude import above.
+All are enabled. The key-gated ones (Shodan, BloodHound) connect once you export their env vars; the rest work without keys. They install into `<lai dir>/mcp-tools` (keep that on your persistence partition so they survive a reboot). Backends are (re)started on every `install.sh` run. Pick a subset with `LAI_MCP_ONLY=hexstrike,kali`, list them with `tools/setup-mcp.sh --list`, or add your own by editing the registry at the top of `tools/setup-mcp.sh`. Not in the set: `capmonster-mcp` (CAPTCHA-solving), and anything with no locatable public repo (e.g. a personal `kali-mcp-sudohakan`). Those, and any others you run, still come across via the OpenCode/Claude import above — add a repo to the registry at the top of `tools/setup-mcp.sh` to automate it.
 
 MCP tools show up to the model as `server__tool`. With `auto_approve` off, they ask first unless the server has `"trust": true`. `${VAR}` in commands, args, env and headers expands from your environment, so secrets can stay out of the config. Server stderr goes to `~/.local/share/lai/logs/mcp-<name>.log`.
 
