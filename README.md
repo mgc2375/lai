@@ -15,6 +15,12 @@ One command does everything: clone, download the model, build, configure, set up
 git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && ./install.sh --serve
 ```
 
+Already have `~/lai` (e.g. on a persistent install)? Update and rerun instead:
+
+```sh
+cd ~/lai && git pull && ./install.sh --serve
+```
+
 The installer comes set up with a test ngrok account. Use your own with `NGROK_AUTHTOKEN=<token> NGROK_DOMAIN=<name>.ngrok-free.dev ./install.sh --serve`, or skip ngrok with `NGROK_AUTHTOKEN= NGROK_DOMAIN= ./install.sh` (then run `lai` in the terminal).
 
 What `install.sh` does, skipping anything already done:
