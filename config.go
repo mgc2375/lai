@@ -43,6 +43,7 @@ type Config struct {
 	MaxTokens      int                        `json:"max_tokens"`
 	SystemPrompt   string                     `json:"system_prompt"` // appended to the built-in prompt
 	AutoApprove    bool                       `json:"auto_approve"`
+	NgrokDomain    string                     `json:"ngrok_domain"` // lai serve starts an ngrok tunnel on this domain
 	Shell          string                     `json:"shell"`
 	CommandTimeout int                        `json:"command_timeout"` // seconds
 	MaxOutput      int                        `json:"max_output"`      // chars of tool output sent back to the model

@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
-# One-shot setup for Parrot OS / Debian. Run it once:
+# One-command setup for Parrot OS / Debian:
 #
-#   ./install.sh                  find your .gguf, pick GPU or CPU, build, configure
-#   ./install.sh /path/model.gguf use this model
+#   ./install.sh                   download the recommended model, build, configure
+#   ./install.sh /path/model.gguf  use a model you already have
+#   ./install.sh --find            search your drives for a .gguf instead
+#   ./install.sh --serve           ...then start the phone page (lai serve)
 #
-# It installs lai, lai-engine and config.json into a "lai" folder next to the
-# model (so a model on a USB drive gets everything beside it), and from then
-# on you just run that folder's lai. Re-running skips the build if nothing
-# changed.
+#   NGROK_AUTHTOKEN=... NGROK_DOMAIN=name.ngrok-free.dev ./install.sh --serve
+#                                  also install ngrok and put the page online
 #
-# Overrides: LAI_DIR (install folder), LAI_GPU=cpu|vulkan|cuda|rocm,
-# LLAMA_TAG (llama.cpp version lai-engine is built against).
+# Re-running skips whatever is already done (download, build, config).
+#
+# Overrides: LAI_MODEL_URL (model to download), LAI_MODEL_DIR (where to keep
+# it), LAI_DIR (install folder), LAI_GPU=cpu|vulkan|cuda|rocm, LLAMA_TAG.
 set -euo pipefail
 
 # lai-engine uses llama.cpp's internal chat helpers, which change between
 # versions, so it is built against this tested tag.
 LLAMA_TAG="${LLAMA_TAG:-b11982}"
+# small, abliterated, strong at code and tool calls (see README)
+LAI_MODEL_URL="${LAI_MODEL_URL:-https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-9B-abliterated.Q6_K.gguf}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
@@ -144,11 +148,76 @@ gpu_works() {
   esac
 }
 
+# fetch_model URL DIR: download (resumable) and print the path; skips a
+# file that is already complete
+fetch_model() {
+  local url="$1" dir="$2" name path
+  name="$(basename "${url%%\?*}")"
+  path="$dir/$name"
+  mkdir -p "$dir"
+  if [ -f "$path" ]; then
+    say "model already downloaded: $path" >&2
+  else
+    say "downloading $name (resumes if interrupted)" >&2
+    curl -fL --retry 5 --retry-delay 3 -C - --progress-bar -o "$path.part" "$url" >&2 \
+      || die "download failed; run install.sh again to resume ($url)"
+    mv "$path.part" "$path"
+  fi
+  printf '%s\n' "$path"
+}
+
+# setup_ngrok DIR: install the ngrok agent next to lai and save the token
+setup_ngrok() {
+  local dir="$1" bin arch="$GOARCH" u
+  [ -n "${NGROK_AUTHTOKEN:-}" ] || [ -n "${NGROK_DOMAIN:-}" ] || return 0
+  bin="$(command -v ngrok || true)"
+  if [ -z "$bin" ]; then
+    bin="$dir/ngrok"
+    if [ ! -x "$bin" ]; then
+      say "installing ngrok"
+      for u in "https://bin.ngrok.com/c/bNyj1mQVY4c/ngrok-v3-stable-linux-$arch.tgz" \
+               "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-$arch.tgz"; do
+        curl -fsSL "$u" | tar xz -C "$dir" ngrok && break
+      done
+      [ -x "$bin" ] || die "couldn't download ngrok"
+    fi
+  fi
+  if [ -n "${NGROK_AUTHTOKEN:-}" ]; then
+    "$bin" config add-authtoken "$NGROK_AUTHTOKEN" >/dev/null || die "ngrok rejected the authtoken"
+    say "ngrok authtoken saved"
+  fi
+}
+
+# merge_config OLD NEW MODEL: keep the user's settings, but when the model
+# changed take the new model's sampling and context settings
+merge_config() {
+  python3 - "$1" "$2" "$3" "${NGROK_DOMAIN:-}" <<'PY'
+import json, sys
+old_path, new_path, model, domain = sys.argv[1:5]
+old, new = json.load(open(old_path)), json.load(open(new_path))
+managed = ["model", "kv_limit_mb", "temperature", "top_p", "top_k", "min_p", "repeat_penalty", "thinking"]
+changed = old.get("model") != model
+if changed:
+    for k in managed:
+        old.pop(k, None)
+        if k in new:
+            old[k] = new[k]
+if domain:
+    old["ngrok_domain"] = domain
+json.dump(old, open(old_path, "w"), indent=2)
+print("updated for the new model" if changed else "kept")
+PY
+}
+
 json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 # write_config FILE MODEL GPU: settings sized to this machine
 write_config() {
-  local cfg="$1" model="$2" gpu="$3" ram_mb model_mb kv sampling=""
+  local cfg="$1" model="$2" gpu="$3" ram_mb model_mb kv sampling="" extra=""
+  if [ -n "${NGROK_DOMAIN:-}" ]; then
+    extra="
+  \"ngrok_domain\": \"$(json_escape "$NGROK_DOMAIN")\","
+  fi
   ram_mb="${LAI_RAM_MB:-$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)}"
   model_mb="$(file_mb "$model")"
   # cache budget: what's left after the model and ~6 GB for the system, 1-8 GB
@@ -179,7 +248,7 @@ write_config() {
   "kv_in_ram": true,
   "kv_limit_mb": $kv,
   "moe_on_cpu": true,$sampling
-  "auto_approve": true,
+  "auto_approve": true,$extra
   "mcpServers": {}
 }
 EOF
@@ -197,17 +266,31 @@ main() {
   [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
   # 1. model
-  local model="${1:-}"
-  if [ -z "$model" ]; then
+  local model="" serve=0 find=0 a
+  for a in "$@"; do
+    case "$a" in
+      --serve) serve=1 ;;
+      --find)  find=1 ;;
+      -*) die "unknown option $a" ;;
+      *) model="$a" ;;
+    esac
+  done
+  local dir_default="$HERE"
+  if [ -n "$model" ]; then
+    dir_default="$(dirname "$model")/lai"
+  elif [ "$find" = 1 ]; then
     say "looking for .gguf models"
     model="$(find_model)"
+    dir_default="$(dirname "$model")/lai"
+  else
+    model="$(fetch_model "$LAI_MODEL_URL" "${LAI_MODEL_DIR:-$HERE/models}")"
   fi
   [ -f "$model" ] || die "model not found: $model"
   model="$(readlink -f "$model")"
   say "model: $model ($(file_mb "$model") MB)"
 
   # 2. install folder: beside the model if writable, else ~/.local/bin
-  local dir="${LAI_DIR:-$(dirname "$model")/lai}"
+  local dir="${LAI_DIR:-$dir_default}"
   if ! mkdir -p "$dir" 2>/dev/null || [ ! -w "$dir" ]; then
     warn "can't write next to the model; installing to ~/.local/bin instead (gone after a reboot on a live system)"
     dir="$HOME/.local/bin"
@@ -258,16 +341,22 @@ main() {
     fi
   fi
 
-  # 6. config, kept if one is already there
-  if [ -f "$dir/config.json" ]; then
-    say "keeping existing $dir/config.json"
+  # 6. config: written once, then only updated when the model changes
+  local kv
+  if [ -f "$dir/config.json" ] && command -v python3 >/dev/null 2>&1; then
+    kv="$(write_config "$dir/config.json.new" "$model" "$gpu")"
+    say "config: $(merge_config "$dir/config.json" "$dir/config.json.new" "$model")"
+    rm -f "$dir/config.json.new"
   else
-    local kv
+    [ -f "$dir/config.json" ] && mv "$dir/config.json" "$dir/config.json.bak"
     kv="$(write_config "$dir/config.json" "$model" "$gpu")"
     say "wrote $dir/config.json (context cache up to ${kv} MB in RAM)"
   fi
 
-  # 7. check both binaries start
+  # 7. ngrok, when a token or domain was given
+  setup_ngrok "$dir"
+
+  # 8. check both binaries start
   "$dir/lai" version >/dev/null || die "$dir/lai doesn't run"
   # with no arguments it prints usage and exits 2, so look at the output, not the status
   local engine_out
@@ -281,13 +370,18 @@ main() {
   if [ "$dir" != "$HOME/.local/bin" ]; then
     mkdir -p "$HOME/.local/bin"
     ln -sf "$dir/lai" "$HOME/.local/bin/lai"
+    [ -x "$dir/ngrok" ] && ln -sf "$dir/ngrok" "$HOME/.local/bin/ngrok"
   fi
 
   echo
   say "done. Start it with:"
   echo "    $dir/lai"
   case ":$PATH:" in *":$HOME/.local/bin:"*) echo "  (or just: lai)" ;; esac
-  echo "  After a reboot, run $dir/lai again; nothing needs reinstalling."
+  echo "  phone page: $dir/lai serve"
+  if [ "$serve" = 1 ]; then
+    echo
+    exec "$dir/lai" serve
+  fi
 }
 
 # sourcing the file (for tests) defines the functions without running setup

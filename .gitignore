@@ -5,3 +5,8 @@
 *.gguf
 config.json
 serve.key
+/ngrok
+/models/
+/.lai-engine-build
+config.json.bak
+config.json.new

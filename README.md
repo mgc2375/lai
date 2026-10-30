@@ -9,22 +9,27 @@ Each weight exists once: the model file is memory-mapped and computed on in plac
 
 ## Install (Parrot OS / Debian)
 
+One command does everything: clone, download the model, build, configure, set up ngrok and start the phone page.
+
 ```sh
-git clone https://github.com/mgc2375/lai.git && cd lai && ./install.sh
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
+  NGROK_AUTHTOKEN=<your token> NGROK_DOMAIN=<name>.ngrok-free.dev ./install.sh --serve
 ```
 
-That's the whole setup. `install.sh`:
+Leave out the two `NGROK_` settings and `--serve` for terminal-only use (`./install.sh`, then `lai`).
 
-1. finds your `.gguf` (or pass one: `./install.sh /path/to/model.gguf`; with several found, it asks);
-2. builds for Vulkan if you have a discrete GPU with a working Vulkan driver, otherwise CPU-only (an integrated GPU would hold the weights twice in RAM, so it's skipped);
-3. installs the build tools with apt if they're missing, and clears apt's download cache afterwards;
-4. builds `lai-engine` against llama.cpp `b11982`, in `/tmp`, removed afterwards;
-5. puts `lai`, `lai-engine` and a `config.json` in a `lai` folder **next to your model**, so a model on a USB drive gets everything beside it;
-6. writes the config: your model, a context-cache budget sized to your RAM, and recommended sampling for Qwen models.
+What `install.sh` does, skipping anything already done:
 
-After that, and after every reboot, just run that folder's `lai`. It reads the `config.json` next to it. Running `install.sh` again skips the build if nothing changed.
+1. **Model:** downloads [Huihui-Qwen3.5-9B-abliterated Q6_K](https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF) (7.4 GB, resumable) into `models/`. Use your own with `./install.sh /path/to/model.gguf`, or `--find` to search your drives.
+2. **Build tools:** installs any missing ones with apt, then clears apt's download cache.
+3. **lai-engine:** builds it against llama.cpp `b11982`. It uses Vulkan if a discrete GPU with a working driver is found, otherwise CPU. A GPU build that crashes on a real token falls back to CPU.
+4. **Config:** writes `config.json` (context budget sized to your RAM, the model's recommended sampling, auto-approve on). Later runs keep your settings and only update the model-specific ones when the model changes.
+5. **ngrok:** installs the agent and saves your authtoken (only when `NGROK_AUTHTOKEN` / `NGROK_DOMAIN` are set). `lai serve` then starts the tunnel itself.
+6. **`--serve`:** starts the phone page and prints its login link.
 
-Overrides: `LAI_GPU=cpu|vulkan|cuda|rocm`, `LAI_DIR=/install/here`.
+Your token is passed on the command line, so it never goes into the repo. On a live boot everything lives in RAM: run the same command after each reboot. To keep the model and build between boots, point `LAI_MODEL_DIR` and `LAI_DIR` at a persistent drive.
+
+Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_GPU=cpu|vulkan|cuda|rocm`.
 
 ## Use
 
@@ -53,7 +58,7 @@ The `bash` tool runs commands as you, with no stdin, so `sudo` can't prompt for 
 
 ```sh
 lai serve                                  # http://127.0.0.1:8090, prints a login link
-lai serve --ngrok YOUR-DOMAIN.ngrok-free.dev   # also starts the tunnel and prints the phone link
+lai serve --ngrok YOUR-DOMAIN.ngrok-free.dev   # also starts the tunnel (or set ngrok_domain in the config)
 ```
 
 - The first run creates a random access key in `serve.key` next to your `config.json` (mode 600). The printed link (`https://…/?key=…`) logs a browser in with a cookie and then drops the key from the address bar. Treat the link like a password: **anyone holding it can run commands on your machine**. Delete `serve.key` to rotate it.
@@ -61,7 +66,7 @@ lai serve --ngrok YOUR-DOMAIN.ngrok-free.dev   # also starts the tunnel and prin
 - Tools follow `auto_approve`: with it off, tool calls from the web page are refused, since there's no one at a terminal to approve them.
 - Wrong keys are slowed down, and ten in a minute lock logins for a minute.
 
-**ngrok setup (once):** install ngrok, then `ngrok config add-authtoken <your token>`. Free accounts get one static domain, and a domain can only be online in one place at a time, so stop anything else using it first. ngrok's free plan shows a "Visit Site" warning page the first time a browser opens the link.
+**ngrok setup:** `install.sh` does it when you pass `NGROK_AUTHTOKEN` and `NGROK_DOMAIN`; by hand it's `ngrok config add-authtoken <your token>` plus `\"ngrok_domain\"` in the config. Free accounts get one static domain, and a domain can only be online in one place at a time, so stop anything else using it first. ngrok's free plan shows a "Visit Site" warning page the first time a browser opens the link.
 
 ## MCP
 

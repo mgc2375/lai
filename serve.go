@@ -439,14 +439,17 @@ func loadKey(dir string) (string, error) {
 func startNgrok(domain string, port int) error {
 	bin, err := exec.LookPath("ngrok")
 	if err != nil {
-		return errors.New("ngrok isn't installed or not on PATH (then run: ngrok config add-authtoken <token>)")
+		bin = filepath.Join(exeDir(), "ngrok") // install.sh puts it next to lai
+		if !fileExists(bin) {
+			return errors.New("ngrok isn't installed (rerun install.sh with NGROK_AUTHTOKEN set)")
+		}
 	}
 	logPath := filepath.Join(logsDir(), "ngrok.log")
 	logf, err := os.Create(logPath)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(bin, "http", "--url="+domain, strconv.Itoa(port), "--log=stdout")
+	cmd := exec.Command(bin, "http", strconv.Itoa(port), "--url", "https://"+domain, "--log", "stdout")
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = childAttr()
 	if err := cmd.Start(); err != nil {
@@ -483,7 +486,7 @@ func cmdServe(args []string) error {
 	cfgPath := fs.String("c", "", "config file")
 	model := fs.String("m", "", "path to a .gguf file")
 	port := fs.Int("port", 8090, "local port (always bound to 127.0.0.1)")
-	domain := fs.String("ngrok", "", "start an ngrok tunnel on this static domain")
+	domain := fs.String("ngrok", "", "start an ngrok tunnel on this static domain (default: ngrok_domain in the config)")
 	public := fs.String("public", "", "public URL to print the phone link for")
 	noMCP := fs.Bool("no-mcp", false, "don't start MCP servers")
 	fs.Parse(args)
@@ -526,6 +529,9 @@ func cmdServe(args []string) error {
 	onCleanup(func() { hs.Close() })
 
 	pub := strings.TrimRight(*public, "/")
+	if *domain == "" {
+		*domain = cfg.NgrokDomain
+	}
 	if *domain != "" {
 		d := strings.TrimRight(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(*domain), "https://"), "http://"), "/")
 		if err := startNgrok(d, *port); err != nil {
