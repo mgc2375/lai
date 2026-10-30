@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """captcha-free: a single MCP server bundling free, open-source CAPTCHA solvers.
 
-Tools, each backed by a free library (no paid API):
-  solve_image_ocr     distorted image/text captchas   -> ddddocr
+Tools, each backed by a free library (no paid API, no cloud):
+  vision_match        "which label fits this image"    -> MobileCLIP (local, ~66MB)
+  solve_image_ocr     distorted image/text captchas    -> ddddocr
+  solve_image_grid    "click all tiles with an X"       -> MobileCLIP, local
   solve_turnstile     Cloudflare Turnstile/Interstitial-> playwright-captcha + camoufox
-  solve_hcaptcha      hCaptcha                         -> hcaptcha-challenger
+  solve_hcaptcha      hCaptcha                         -> hcaptcha-challenger (needs GEMINI_API_KEY)
   solve_recaptcha_v2  reCAPTCHA v2                      -> PyPasser (audio)
+
+vision_match / solve_image_grid give the text model local eyes via a small
+CLIP encoder — no LLM, no key — enough to pick image tiles matching a word.
 
 Backends load lazily, so the server starts (and lists its tools) even before
 the browser/model dependencies are installed; a tool returns a clear error if
@@ -33,6 +38,58 @@ def _ocr_engine():
         import ddddocr  # type: ignore
         _ddddocr = ddddocr.DdddOcr(show_ad=False)
     return _ddddocr
+
+
+def _open_image(image_base64: str, image_path: str):
+    if image_path:
+        return __import__("PIL.Image", fromlist=["Image"]).open(image_path)
+    data = base64.b64decode(image_base64.split(",")[-1])
+    return __import__("PIL.Image", fromlist=["Image"]).open(io.BytesIO(data))
+
+
+@mcp.tool()
+def vision_match(labels: list[str], image_base64: str = "", image_path: str = "") -> str:
+    """Score an image against candidate labels with a local CLIP model (no key).
+
+    Returns each label with a 0..1 score, highest first — e.g. ask
+    ["a photo of a bus", "no bus"] to tell whether an image contains a bus."""
+    try:
+        import clip_vision  # type: ignore
+    except ModuleNotFoundError:
+        return "error: deps missing (pip install onnxruntime pillow numpy tokenizers)"
+    try:
+        img = _open_image(image_base64, image_path)
+        res = clip_vision.match(img, labels)
+        return "\n".join(f"{p:.3f}  {l}" for l, p in res)
+    except Exception as e:  # noqa: BLE001
+        return f"error: {e}"
+
+
+@mcp.tool()
+def solve_image_grid(label: str, image_paths: list[str] = [], rel: float = 0.92) -> str:
+    """Pick which grid tiles match `label` (e.g. 'bus') for a "select all X" captcha.
+
+    Scores every tile against the label and selects those closest to the best
+    match (within `rel` of the top score) — relative ranking, since captcha
+    grids always have at least one correct tile. Local CLIP, no key. Crop the
+    grid into tiles yourself (or drive it from the browser) and pass the paths."""
+    try:
+        import clip_vision  # type: ignore
+        from PIL import Image  # type: ignore
+        import numpy as np  # type: ignore
+    except ModuleNotFoundError:
+        return "error: deps missing (pip install onnxruntime pillow numpy tokenizers)"
+    if not image_paths:
+        return "error: pass image_paths (the cropped tiles)"
+    try:
+        tv = clip_vision.text_embed([f"a photo of a {label}"])[0]
+        sims = np.array([float(tv @ clip_vision.image_embed(Image.open(p))) for p in image_paths])
+        cutoff = sims.max() * rel
+        picks = [i for i, s in enumerate(sims) if s >= cutoff]
+        detail = "  ".join(f"{i}:{s:.3f}" for i, s in enumerate(sims))
+        return f"click tiles: {', '.join(map(str, picks))}\nscores: {detail}"
+    except Exception as e:  # noqa: BLE001
+        return f"error: {e}"
 
 
 @mcp.tool()

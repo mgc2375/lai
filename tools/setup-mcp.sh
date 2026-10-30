@@ -193,8 +193,11 @@ for e in "${REGISTRY[@]}"; do
           || warn "$name: some deps failed to install (log above); the server still starts, tools needing them report it"
       fi
       "$dir/.venv/bin/python" -m camoufox fetch >/dev/null 2>&1 || true   # stealth browser for turnstile/hcaptcha
-      entry "$name" "$(printf '{"command": "%s/.venv/bin/python", "args": ["%s/%s"], "env": {"GEMINI_API_KEY": "${GEMINI_API_KEY}"}, "trust": true}' "$dir" "$dir" "$(basename "$arg")")"
-      warn "$name: hCaptcha needs GEMINI_API_KEY (free from Google AI Studio); OCR + Turnstile + reCAPTCHA need no key"
+      # pre-fetch the small local CLIP vision model (~66 MB) so it persists
+      ( cd "$dir" && LAI_CLIP_DIR="$dir/clip" "$dir/.venv/bin/python" -c "import clip_vision; clip_vision.ensure_model()" ) >/dev/null 2>&1 \
+        || warn "$name: couldn't pre-download the CLIP model; it fetches on first vision call"
+      entry "$name" "$(printf '{"command": "%s/.venv/bin/python", "args": ["%s/%s"], "cwd": "%s", "env": {"GEMINI_API_KEY": "${GEMINI_API_KEY}", "LAI_CLIP_DIR": "%s/clip"}, "trust": true}' "$dir" "$dir" "$(basename "$arg")" "$dir" "$dir")"
+      warn "$name: local vision (vision_match/solve_image_grid) + OCR + Turnstile + reCAPTCHA need no key; only hCaptcha via Gemini needs GEMINI_API_KEY"
       ;;
     uvx-pkg) # published pypi package, run with uvx; arg = package
       ensure_uv

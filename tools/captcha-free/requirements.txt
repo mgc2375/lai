@@ -1,5 +1,9 @@
 # captcha-free MCP server deps
 mcp[cli]<2
+onnxruntime        # local CLIP vision (vision_match/solve_image_grid)
+pillow
+numpy
+tokenizers
 ddddocr            # image/OCR captchas (local, no key)
 playwright-captcha # Cloudflare Turnstile/Interstitial (free click-solve)
 camoufox[geoip]    # stealth browser for turnstile + hcaptcha
