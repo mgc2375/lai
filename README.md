@@ -7,50 +7,45 @@ A small local AI agent for the terminal. It loads a GGUF model into memory and l
 
 Each weight exists once: the model file is memory-mapped and computed on in place (llama.cpp's weight repacking, which keeps a second copy in RAM, is turned off), and any layers you put on the GPU live only in VRAM.
 
-## Install (Parrot OS / Debian)
+## Install (Parrot OS / Debian) — one command
 
-One command does everything: clone, download the model, build, configure, set up ngrok and start the phone page.
-
-```sh
-git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && ./install.sh --serve
-```
-
-Already have `~/lai` (e.g. on a persistent install)? Update and rerun instead:
+This clones lai, downloads the model, builds the engine, sets up **all** the MCP servers, configures everything, and starts the phone page:
 
 ```sh
-cd ~/lai && git pull && ./install.sh --serve
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && ./install.sh --serve --mcp
 ```
 
-The installer comes set up with a test ngrok account. Use your own with `NGROK_AUTHTOKEN=<token> NGROK_DOMAIN=<name>.ngrok-free.dev ./install.sh --serve`, or skip ngrok with `NGROK_AUTHTOKEN= NGROK_DOMAIN= ./install.sh` (then run `lai` in the terminal).
-
-What `install.sh` does, skipping anything already done:
-
-1. **Model:** downloads [Huihui-Qwen3.5-9B-abliterated Q6_K](https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF) (7.4 GB, resumable) into `models/`. Use your own with `./install.sh /path/to/model.gguf`, or `--find` to search your drives.
-2. **Build tools:** installs any missing ones with apt, then clears apt's download cache.
-3. **lai-engine:** builds it against llama.cpp `b11982`. It uses Vulkan if a discrete GPU with a working driver is found, otherwise CPU. A GPU build that crashes on a real token falls back to CPU.
-4. **Config:** writes `config.json` (context budget sized to your RAM, the model's recommended sampling, auto-approve on). Later runs keep your settings and only update the model-specific ones when the model changes.
-5. **ngrok:** installs the agent and saves your authtoken (only when `NGROK_AUTHTOKEN` / `NGROK_DOMAIN` are set). `lai serve` then starts the tunnel itself.
-6. **`--serve`:** starts the phone page and prints its login link.
-
-On a live boot everything lives in RAM: run the same command after each reboot. To keep the model and build between boots, point `LAI_MODEL_DIR` and `LAI_DIR` at a persistent drive.
-
-### Live boot: survive reboots and keep your MCP tools
-
-On a live USB everything is wiped on reboot, so by default each boot re-downloads the model and rebuilds. Point `LAI_PERSIST` at a folder on your persistence partition and the model, the built engine and the config all live there; the next boot finds them ready and just starts:
+That's it. For keys you have, set them right before `./install.sh` (all optional — the servers that need them just stay dormant until set):
 
 ```sh
-LAI_PERSIST=/run/live/persistence/*/lai ./install.sh --serve
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
+  SHODAN_API_KEY=… CM_API_KEY=… GEMINI_API_KEY=… \
+  BLOODHOUND_DOMAIN=… BLOODHOUND_TOKEN_ID=… BLOODHOUND_TOKEN_KEY=… \
+  ./install.sh --serve --mcp
 ```
 
-Your MCP servers (`mcp-kali-server`, `hexstrike-ai`, impacket/BloodHound wrappers, etc.) each run a local command or backend, so they aren't bundled. Set them up once the way you already do in OpenCode, keep that config **and the tool clones/backends on the persistence partition**, and lai re-imports the config on every run — automatically when it's at a standard path, or point to it with `LAI_MCP`:
+**On a live USB (persist across reboots):** point `LAI_PERSIST` at your persistence partition so nothing re-downloads or rebuilds next boot (find it with `ls /run/live/persistence/`):
 
 ```sh
-LAI_PERSIST=/run/live/persistence/*/lai LAI_MCP=/run/live/persistence/*/opencode.json ./install.sh --serve
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
+  LAI_PERSIST=/run/live/persistence/<partition>/lai ./install.sh --serve --mcp
 ```
 
-That way one command brings back the model, the agent, the phone page and all your tools. (CAPTCHA-solving servers like `capmonster-mcp` are the one thing lai won't wire up for you; import carries over whatever is in your own config.)
+**Already have `~/lai`?** Update and rerun:
 
-Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP`, `LAI_PERSIST`, `LAI_GPU=cpu|vulkan|cuda|rocm`.
+```sh
+cd ~/lai && git pull && ./install.sh --serve --mcp
+```
+
+What it does, skipping anything already done:
+
+1. **Model:** downloads [Huihui-Qwen3.5-9B-abliterated Q6_K](https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF) (7.4 GB, resumable). Use your own with `./install.sh /path/to/model.gguf`, or `--find` to search your drives.
+2. **Engine:** installs build tools (then clears apt's cache) and builds `lai-engine` against llama.cpp `b11982` — Vulkan if a working discrete GPU is found, else CPU, with a CPU fallback if a GPU build crashes.
+3. **Config:** writes `config.json` (context sized to your RAM, the model's recommended sampling, auto-approve on). Reruns keep your settings and only refresh the model-specific ones when the model changes.
+4. **`--mcp`:** clones, builds and registers every MCP server in the registry (see below) and starts their backends.
+5. **ngrok + `--serve`:** installs ngrok, saves the authtoken, starts the tunnel and prints the phone login link. (Comes set up with a test ngrok account; override with `NGROK_AUTHTOKEN=` / `NGROK_DOMAIN=`, or drop `--serve` to stay terminal-only.)
+
+Leave off `--mcp` for just the agent, or `--serve` for terminal-only. Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP` (import an existing OpenCode/Claude config too), `LAI_PERSIST`, `LAI_MCP_ONLY=hexstrike,kali,…`, `LAI_GPU=cpu|vulkan|cuda|rocm`.
 
 ## Use
 
