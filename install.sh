@@ -7,8 +7,9 @@
 #   ./install.sh --serve           ...then start the phone page (lai serve)
 #   ./install.sh --mcp             ...also clone & set up the pentest MCP servers
 #                                  (hexstrike, kali, impacket, pentester, bloodhound)
-#   ./install.sh --memguard        ...also run the memory guard (swap on the SSD +
-#                                  soft RAM cap); tune with SWAP_DEV/SOFT_CAP_GB/etc
+#   ./install.sh --memguard        ...also run the memory guard (swap + soft RAM cap).
+#                                  LAI_PERSIST_SWAP=11G puts the swapfile on the
+#                                  persistence partition (reserved once, reused each boot)
 #
 #   NGROK_AUTHTOKEN=... NGROK_DOMAIN=name.ngrok-free.dev ./install.sh --serve
 #                                  use another ngrok account (defaults below;
@@ -70,6 +71,7 @@ if [ -n "${LAI_PERSIST:-}" ]; then
   if [ -b "$LAI_PERSIST" ]; then
     _mp="$(mount_persist "$LAI_PERSIST")" || die "couldn't mount $LAI_PERSIST"
     [ -n "$_mp" ] || die "couldn't mount $LAI_PERSIST"
+    LAI_PERSIST_MOUNT="$_mp"   # the partition root, for an on-partition swapfile
     LAI_PERSIST="$_mp/lai"
   fi
   mkdir -p "$LAI_PERSIST" || die "can't create $LAI_PERSIST"
@@ -456,12 +458,20 @@ main() {
     [ -x "$dir/ngrok" ] && ln -sf "$dir/ngrok" "$HOME/.local/bin/ngrok"
   fi
 
-  # memory guard: swap on the SSD + soft RAM cap, running in the background
+  # memory guard: swap + soft RAM cap, running in the background
   if [ "$memguard" = 1 ]; then
     if [ -f "$HERE/tools/memguard.sh" ]; then
-      say "starting the memory guard (swap on the data disk, soft cap ${SOFT_CAP_GB:-29}G)"
-      $SUDO env SWAP_DEV="${SWAP_DEV:-}" SOFT_CAP_GB="${SOFT_CAP_GB:-29}" \
-        RAMP_START_GB="${RAMP_START_GB:-22}" IDLE_MIN="${IDLE_MIN:-8}" SWAP_SIZE="${SWAP_SIZE:-24G}" \
+      local mg_dir="" mg_size="${SWAP_SIZE:-24G}"
+      # LAI_PERSIST_SWAP=<size> puts the swapfile ON the persistence partition
+      # (reserved first-install, reused every boot after)
+      if [ -n "${LAI_PERSIST_SWAP:-}" ] && [ -n "${LAI_PERSIST_MOUNT:-}" ]; then
+        mg_dir="$LAI_PERSIST_MOUNT"; mg_size="$LAI_PERSIST_SWAP"
+        say "starting the memory guard (${mg_size} swapfile on the persistence partition, soft cap ${SOFT_CAP_GB:-29}G)"
+      else
+        say "starting the memory guard (swap on a data disk, soft cap ${SOFT_CAP_GB:-29}G)"
+      fi
+      $SUDO env SWAP_DEV="${SWAP_DEV:-}" SWAP_DIR="$mg_dir" SWAP_SIZE="$mg_size" \
+        SOFT_CAP_GB="${SOFT_CAP_GB:-29}" RAMP_START_GB="${RAMP_START_GB:-22}" IDLE_MIN="${IDLE_MIN:-8}" \
         setsid bash "$HERE/tools/memguard.sh" >"$dir/memguard.log" 2>&1 < /dev/null &
       echo "  memguard log: $dir/memguard.log  (stop it with: sudo pkill -f memguard.sh)"
     else

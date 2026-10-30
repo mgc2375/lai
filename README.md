@@ -49,6 +49,17 @@ git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
 
   A swap partition lives on the physical disk, so it persists across reboots; memguard reactivates it automatically after that.
 
+**Persistence + swap on one partition (your 21 GB `sdc3`: ~10 GB tools, ~11 GB swap):**
+
+```sh
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
+  LAI_PERSIST=/dev/sdc3 LAI_PERSIST_SWAP=11G ./install.sh --serve --mcp --memguard
+```
+
+- `LAI_PERSIST=/dev/sdc3` mounts the partition; lai's tools/config live in a folder on it (~5 GB, inside your 10 GB), model in RAM.
+- `LAI_PERSIST_SWAP=11G` reserves an **11 GB swapfile on the same partition** — no repartitioning (you can't partition a partition; a swapfile is identical in effect and non-destructive). It's created **once on first install** and simply reactivated every boot after; memguard detects the existing swapfile and reuses it. Stopping memguard turns the swap off but keeps the file, so it's instant next time.
+- Everything else (graded swappiness to the 29 GB cap, idle cache drop) works as before. Swap on a USB partition is slower than on a hard disk — if you want faster swap, put it on `sdb` instead with `SWAP_DEV=sdb` (and run `tools/make-swap.sh sdb` once if that disk is NTFS).
+
 **Already have `~/lai`?** Update and rerun:
 
 ```sh

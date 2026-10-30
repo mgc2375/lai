@@ -35,7 +35,8 @@ ORIG_WATERMARK="$(cat /proc/sys/vm/watermark_scale_factor 2>/dev/null || echo 10
 
 cleanup() {
   log "stopping; restoring settings"
-  [ -n "$SWAPFILE" ] && swapoff "$SWAPFILE" 2>/dev/null && rm -f "$SWAPFILE"
+  # turn our swapfile off but KEEP it, so the next run reuses it instead of rebuilding
+  [ -n "$SWAPFILE" ] && swapoff "$SWAPFILE" 2>/dev/null || true
   echo "$ORIG_SWAPPINESS" > /proc/sys/vm/swappiness 2>/dev/null || true
   echo "$ORIG_WATERMARK" > /proc/sys/vm/watermark_scale_factor 2>/dev/null || true
   [ -d "$CGROUP" ] && rmdir "$CGROUP" 2>/dev/null || true
@@ -43,8 +44,24 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-# ---- swap on the SSD ----
+# ---- swap on a disk (swapfile, or an existing swap partition) ----
 setup_swap() {
+  # SWAP_DIR given (e.g. the persistence partition): put the swapfile right there
+  if [ -n "${SWAP_DIR:-}" ]; then
+    local f="$SWAP_DIR/lai.swap"
+    if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$f"; then
+      log "swapfile already active: $f"; return
+    fi
+    if [ -f "$f" ]; then                      # created on a previous boot: just turn it on
+      swapon "$f" 2>/dev/null && { log "reusing swapfile $f"; return; }
+    fi
+    local fst; fst="$(findmnt -nro FSTYPE --target "$SWAP_DIR" 2>/dev/null)"
+    case "$fst" in
+      ext4|ext3|xfs) make_swapfile "$f" ;;
+      *) log "$SWAP_DIR is $fst — can't host a swapfile; use a swap partition" ;;
+    esac
+    return
+  fi
   if [ -n "$(swapon --show=NAME --noheadings 2>/dev/null | grep -i "$SWAP_DEV" || true)" ]; then
     log "existing swap on $SWAP_DEV, leaving it"
     return
@@ -57,7 +74,7 @@ setup_swap() {
       swapon "$swp" 2>/dev/null && { log "swap on existing partition $swp"; return; }
     fi
   done
-  local dir="${SWAP_DIR:-}" fstype=""
+  local dir="" fstype=""
   if [ -z "$dir" ]; then
     # a mounted writable filesystem on $SWAP_DEV?
     while read -r src tgt fst; do
@@ -85,7 +102,12 @@ setup_swap() {
     btrfs)
       log "btrfs needs a special swapfile setup; make a swap partition instead:  sudo bash tools/make-swap.sh $SWAP_DEV ${SWAP_SIZE}"; return ;;
   esac
-  SWAPFILE="$dir/lai.swap"
+  make_swapfile "$dir/lai.swap"
+}
+
+# make_swapfile PATH — create, format and activate a SWAP_SIZE swapfile; sets SWAPFILE
+make_swapfile() {
+  SWAPFILE="$1"
   log "creating $SWAP_SIZE swapfile at $SWAPFILE"
   if ! fallocate -l "$SWAP_SIZE" "$SWAPFILE" 2>/dev/null; then
     local mb; mb=$(numfmt --from=iec "$SWAP_SIZE" 2>/dev/null); mb=$(( ${mb:-0} / 1048576 ))
@@ -145,9 +167,13 @@ pick_swap_dev() {
 }
 
 main() {
-  [ -n "$SWAP_DEV" ] || SWAP_DEV="$(pick_swap_dev)"
-  [ -n "$SWAP_DEV" ] || log "couldn't pick a swap disk; set SWAP_DEV=sdb"
-  log "start: soft cap ${SOFT_CAP_GB}G, ramp from ${RAMP_START_GB}G, idle cache drop after ${IDLE_MIN}m, swap on /dev/${SWAP_DEV:-none}"
+  if [ -n "${SWAP_DIR:-}" ]; then
+    log "start: soft cap ${SOFT_CAP_GB}G, ramp from ${RAMP_START_GB}G, idle cache drop after ${IDLE_MIN}m, ${SWAP_SIZE} swapfile in $SWAP_DIR"
+  else
+    [ -n "$SWAP_DEV" ] || SWAP_DEV="$(pick_swap_dev)"
+    [ -n "$SWAP_DEV" ] || log "couldn't pick a swap disk; set SWAP_DEV=sdb or SWAP_DIR=<path>"
+    log "start: soft cap ${SOFT_CAP_GB}G, ramp from ${RAMP_START_GB}G, idle cache drop after ${IDLE_MIN}m, swap on /dev/${SWAP_DEV:-none}"
+  fi
   setup_swap
   setup_cgroup
   setup_sysctls
