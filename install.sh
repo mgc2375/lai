@@ -5,6 +5,8 @@
 #   ./install.sh /path/model.gguf  use a model you already have
 #   ./install.sh --find            search your drives for a .gguf instead
 #   ./install.sh --serve           ...then start the phone page (lai serve)
+#   ./install.sh --mcp             ...also clone & set up the pentest MCP servers
+#                                  (hexstrike, kali, impacket, pentester, bloodhound)
 #
 #   NGROK_AUTHTOKEN=... NGROK_DOMAIN=name.ngrok-free.dev ./install.sh --serve
 #                                  use another ngrok account (defaults below;
@@ -291,15 +293,17 @@ main() {
   [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
   # 1. model
-  local model="" serve=0 find=0 a
+  local model="" serve=0 find=0 setup_mcp=0 a
   for a in "$@"; do
     case "$a" in
       --serve) serve=1 ;;
       --find)  find=1 ;;
+      --mcp)   setup_mcp=1 ;;
       -*) die "unknown option $a" ;;
       *) model="$a" ;;
     esac
   done
+  [ -n "${LAI_SETUP_MCP:-}" ] && setup_mcp=1
   local dir_default="$HERE"
   if [ -n "$model" ]; then
     dir_default="$(dirname "$model")/lai"
@@ -378,7 +382,22 @@ main() {
     say "wrote $dir/config.json (context cache up to ${kv} MB in RAM)"
   fi
 
-  # 6b. import MCP servers from an OpenCode / Claude Desktop config
+  # 6b. with --mcp, clone and register the built-in pentest MCP servers
+  local tools_dir="${LAI_TOOLS_DIR:-$dir/mcp-tools}"
+  if [ "$setup_mcp" = 1 ]; then
+    say "setting up MCP servers in $tools_dir (clones + builds; takes a while)"
+    if TOOLS_DIR="$tools_dir" bash "$HERE/tools/setup-mcp.sh" ${LAI_MCP_ONLY:+--only "$LAI_MCP_ONLY"}; then
+      "$dir/lai" mcp import "$tools_dir/mcp-servers.json" || warn "couldn't import the generated MCP config"
+    else
+      warn "MCP setup failed; continuing without it (rerun: TOOLS_DIR=$tools_dir bash tools/setup-mcp.sh)"
+    fi
+  fi
+  # start any MCP backends every run, so they come back after a reboot
+  if [ -x "$tools_dir/start-backends.sh" ]; then
+    say "starting MCP backends"; bash "$tools_dir/start-backends.sh" || true
+  fi
+
+  # 6c. also import an existing OpenCode / Claude Desktop config when present
   local mcpsrc="${LAI_MCP:-}"
   if [ -z "$mcpsrc" ]; then
     for c in "$HOME/.config/opencode/opencode.json" "$HOME/.config/opencode/config.json" \

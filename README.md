@@ -107,6 +107,20 @@ lai mcp import ~/.config/opencode/opencode.json   # or a claude_desktop_config.j
 
 `install.sh` does this automatically when it finds an OpenCode or Claude Desktop config (override with `LAI_MCP=/path/to/config.json`). The formats differ slightly (OpenCode's single `command` array, `environment`, `enabled`, ms timeouts); lai converts them.
 
+### Set up the pentest MCP servers automatically
+
+`./install.sh --mcp` clones, builds and registers a set of security MCP servers, so they're ready without hand-setup:
+
+| name | repo | notes |
+|---|---|---|
+| hexstrike-ai | 0x4m4/hexstrike-ai | backend on :8888, started for you |
+| mcp-kali-server | Wh0am123/MCP-Kali-Server | command-exec backend on :5000 |
+| sec-impacket-mcp | schwarztim/sec-impacket-mcp | node build |
+| pentester-mcp | halilkirazkaya/pentester-mcp | ~235 tool wrappers |
+| sec-bloodhound-mcp | mwnickerson/bloodhound_mcp | left disabled until you set `BLOODHOUND_DOMAIN`/`TOKEN_ID`/`TOKEN_KEY` |
+
+They install into `<lai dir>/mcp-tools` (keep that on your persistence partition so they survive a reboot). Backends are (re)started on every `install.sh` run. Pick a subset with `LAI_MCP_ONLY=hexstrike,kali`, list them with `tools/setup-mcp.sh --list`, or add your own by editing the registry at the top of `tools/setup-mcp.sh`. Servers that aren't in this set — or that need your own credentials — still come across via the OpenCode/Claude import above.
+
 MCP tools show up to the model as `server__tool`. With `auto_approve` off, they ask first unless the server has `"trust": true`. `${VAR}` in commands, args, env and headers expands from your environment, so secrets can stay out of the config. Server stderr goes to `~/.local/share/lai/logs/mcp-<name>.log`.
 
 ## Config
