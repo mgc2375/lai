@@ -83,6 +83,14 @@ lai mcp ls      # connects to each server and lists its tools
 lai mcp rm fs
 ```
 
+Already have servers set up in OpenCode or Claude Desktop? Import them instead of re-adding each one:
+
+```sh
+lai mcp import ~/.config/opencode/opencode.json   # or a claude_desktop_config.json
+```
+
+`install.sh` does this automatically when it finds an OpenCode or Claude Desktop config (override with `LAI_MCP=/path/to/config.json`). The formats differ slightly (OpenCode's single `command` array, `environment`, `enabled`, ms timeouts); lai converts them.
+
 MCP tools show up to the model as `server__tool`. With `auto_approve` off, they ask first unless the server has `"trust": true`. `${VAR}` in commands, args, env and headers expands from your environment, so secrets can stay out of the config. Server stderr goes to `~/.local/share/lai/logs/mcp-<name>.log`.
 
 ## Config

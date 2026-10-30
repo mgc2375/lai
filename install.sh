@@ -357,6 +357,19 @@ main() {
     say "wrote $dir/config.json (context cache up to ${kv} MB in RAM)"
   fi
 
+  # 6b. import MCP servers from an OpenCode / Claude Desktop config
+  local mcpsrc="${LAI_MCP:-}"
+  if [ -z "$mcpsrc" ]; then
+    for c in "$HOME/.config/opencode/opencode.json" "$HOME/.config/opencode/config.json" \
+             "$HOME/.opencode.json" "$HOME/.config/Claude/claude_desktop_config.json"; do
+      [ -f "$c" ] && { mcpsrc="$c"; break; }
+    done
+  fi
+  if [ -n "$mcpsrc" ] && [ -f "$mcpsrc" ]; then
+    say "importing MCP servers from $mcpsrc"
+    "$dir/lai" mcp import "$mcpsrc" || warn "couldn't import MCP servers from $mcpsrc"
+  fi
+
   # 7. ngrok, when a token or domain was given
   setup_ngrok "$dir"
 

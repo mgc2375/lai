@@ -27,6 +27,7 @@ usage:
   lai mcp add <name> [-e K=V]... [--trust] -- <command> [args...]
   lai mcp add <name> --url <url> [-H "Key: Value"]... [--trust]
   lai mcp rm <name>
+  lai mcp import <file>          add MCP servers from an OpenCode / Claude Desktop config
   lai config                    show the config file (creates it if missing)
 
 chat flags:
@@ -324,6 +325,17 @@ func cmdMCP(args []string) error {
 		sub = args[0]
 	}
 	switch sub {
+	case "import":
+		if len(args) != 2 {
+			return errors.New("usage: lai mcp import <opencode.json | claude_desktop_config.json>\n       merges its MCP servers into " + path)
+		}
+		n, err := importMCP(path, args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("imported %d MCP server(s) into %s\ncheck them with: lai mcp ls\n", n, path)
+		return nil
+
 	case "ls", "list", "":
 		cfg, err := loadConfig(path)
 		if err != nil {
