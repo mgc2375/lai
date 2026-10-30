@@ -44,6 +44,9 @@ LLAMA_TAG="${LLAMA_TAG:-b11982}"
 # test ngrok account for the phone page (set NGROK_AUTHTOKEN= to skip ngrok)
 NGROK_AUTHTOKEN="${NGROK_AUTHTOKEN-3KlWECINqX6TREUEicydo49Fdca_7Y3tYCMbphn5brHqKEsqh}"
 NGROK_DOMAIN="${NGROK_DOMAIN-sasquatch-ducking-revered.ngrok-free.dev}"
+# fixed access key the serve endpoint requires (the Mac companion sends it as a
+# Bearer token). Overrides the random serve.key. Change it for anything real.
+export LAI_SERVE_KEY="${LAI_SERVE_KEY-test-key-change_me}"
 # small, abliterated, strong at code and tool calls (see README)
 LAI_MODEL_URL="${LAI_MODEL_URL:-https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-9B-abliterated.Q6_K.gguf}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

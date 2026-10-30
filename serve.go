@@ -415,9 +415,13 @@ func (s *server) apiClear(w http.ResponseWriter, r *http.Request) {
 
 // ---- setup ----
 
-// loadKey returns the access key stored in dir, creating a random one the
-// first time.
+// loadKey returns the access key. LAI_SERVE_KEY, if set, is used verbatim
+// (so you can pin a fixed key for a client). Otherwise it reads serve.key in
+// dir, creating a random one the first time.
 func loadKey(dir string) (string, error) {
+	if k := strings.TrimSpace(os.Getenv("LAI_SERVE_KEY")); k != "" {
+		return k, nil
+	}
 	p := filepath.Join(dir, "serve.key")
 	if b, err := os.ReadFile(p); err == nil {
 		if k := strings.TrimSpace(string(b)); len(k) >= 32 {

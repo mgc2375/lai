@@ -125,6 +125,7 @@ lai serve --ngrok YOUR-DOMAIN.ngrok-free.dev   # also starts the tunnel (or set 
 ```
 
 - The first run creates a random access key in `serve.key` next to your `config.json` (mode 600). The printed link (`https://…/?key=…`) logs a browser in with a cookie and then drops the key from the address bar. Treat the link like a password: **anyone holding it can run commands on your machine**. Delete `serve.key` to rotate it.
+- To pin a fixed key instead of the random one, set `LAI_SERVE_KEY` — it's used verbatim and overrides `serve.key`. `install.sh` defaults it to `test-key-change_me` so a client (e.g. a companion app) can be wired up ahead of time; change it for anything real. A client that isn't a browser skips the login page and just sends `Authorization: Bearer <key>` to `/api/chat` and `/api/stream` (the `?key=` query param only works on the browser login page `/`, not the API endpoints).
 - One conversation is shared between the terminal session and every device that's logged in. If the phone loses signal or the tab sleeps, it reconnects and catches up from where it was. **Stop** cancels the current reply and **Clear** starts over.
 - Tools follow `auto_approve`: with it off, tool calls from the web page are refused, since there's no one at a terminal to approve them.
 - Wrong keys are slowed down, and ten in a minute lock logins for a minute.
