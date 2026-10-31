@@ -94,6 +94,25 @@ Leave off `--mcp` for just the agent, or `--serve` for terminal-only. Overrides:
 
 Built and tested against Parrot/Debian conventions: apt for packages, cgroup v2 (Parrot 6+) for the memory cap, and live-boot overlay/persistence. Every root/optional step degrades gracefully — if cgroup v2, a swap target, Docker or a GPU driver isn't there, that piece is skipped with a logged reason rather than failing the install. The memory guard needs root (the install uses `sudo`); check `memguard.log` to see the swap device and cap it chose.
 
+### GPU: use the proprietary NVIDIA driver
+
+If the install says *"your NVIDIA GPU is on the open-source nouveau/NVK driver … building for CPU"*, that's lai protecting you: NVK (nouveau's Vulkan) **loses the device under llama.cpp's compute and crashes the session**, so lai correctly falls back to CPU. It isn't a lai bug — the fix is the proprietary driver.
+
+Install it, reboot, then rebuild:
+
+```sh
+sudo bash tools/enable-gpu.sh
+sudo reboot
+# after reboot:
+cd ~/lai && ./install.sh --serve
+```
+
+Once the proprietary driver is in, `./install.sh` detects the GPU on its own (Vulkan), tests it on your model, and builds for the GPU. Add `--cuda` to the helper (`sudo bash tools/enable-gpu.sh --cuda`) if you want a CUDA build (`LAI_GPU=cuda`) instead of Vulkan; it's a bigger download and usually not needed.
+
+**Live-boot caveat:** the driver writes to the root filesystem and builds a kernel module, so it only survives a reboot on a **persistent/installed** Parrot whose persistence covers the *root* overlay. On a pure-RAM live boot it's gone next boot (so lai is back on CPU). Install Parrot to disk, or use full root persistence, if you want the GPU to stick.
+
+**4 GB cards (e.g. GTX 1650):** a 7–9B model doesn't fully fit in 4 GB VRAM. lai still uses the GPU, but for a dense model bigger than your VRAM set a partial offload in `~/.config/lai/config.json` — e.g. `"gpu_layers": 20`, raised until VRAM is nearly full (watch `nvidia-smi`). Prompt processing speeds up the most; the KV cache can stay in RAM (`"kv_in_ram": true`) to leave room for weights.
+
 ## Use
 
 ```sh
@@ -246,6 +265,8 @@ lai mcp import ~/lai/mcp-tools/mcp-servers.json
 ```
 
 Install one server at a time to see its errors: `TOOLS_DIR=~/lai/mcp-tools bash tools/setup-mcp.sh --only captcha-free`. List what's registered: `tools/setup-mcp.sh --list`.
+
+**Running on CPU despite having a GPU?** The open-source nouveau/NVK driver crashes on this workload, so lai falls back to CPU on purpose. Install the proprietary NVIDIA driver and rebuild — see [GPU: use the proprietary NVIDIA driver](#gpu-use-the-proprietary-nvidia-driver).
 
 **Logs.** Engine: `~/.local/share/lai/logs/engine.log`. Each MCP server's stderr: `~/.local/share/lai/logs/mcp-<name>.log`.
 
