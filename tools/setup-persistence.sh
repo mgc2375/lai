@@ -81,13 +81,47 @@ if [ "${LAI_DISK_YES:-}" != 1 ]; then
   read -r ans; [ "$ans" = yes ] || die "aborted"
 fi
 
-before="$(lsblk -nro NAME "$dev" | sort)"
+# record what's already there — NONE of it gets touched (e.g. sdc1/sdc2 = the
+# live-boot ISO, sdc3 = your data partition)
+say "existing partitions on $dev (these are NOT touched):"
+lsblk -nro NAME,SIZE,FSTYPE,LABEL "$dev" | sed 's/^/      /' >&2
+before_names="$(lsblk -nro NAME "$dev" | sort)"
+before_tbl="$(sfdisk -d "$dev" 2>/dev/null | grep -E '^/dev/' || true)"
+
+# back up the whole partition table first, so it can be restored if anything is off
+gpt_backup="$PWD/lai-parttable-$(basename "$dev")-$(date +%Y%m%d%H%M%S).bin"
+if sgdisk --backup="$gpt_backup" "$dev" >/dev/null 2>&1; then
+  say "backed up $dev's partition table -> $gpt_backup"
+  say "  (restore with: sudo sgdisk --load-backup='$gpt_backup' $dev)"
+fi
+
+# create ONE partition in free space only: auto number (0 = next free, so it
+# becomes the highest-numbered partition), auto start (0 = first free sector).
+# sgdisk writes only a new GPT entry + the new partition's own area; it never
+# resizes, moves or rewrites an existing partition.
 sgdisk -n "0:0:+${size}" -t 0:8300 -c 0:persistence "$dev" >/dev/null
 partprobe "$dev" 2>/dev/null || true; sleep 1
-mapfile -t newp < <(comm -13 <(printf '%s\n' "$before") <(lsblk -nro NAME "$dev" | sort))
-[ "${#newp[@]}" -ge 1 ] || die "expected a new partition; check 'lsblk $dev'"
+
+# SAFETY: every partition that existed before must be byte-for-byte unchanged
+after_tbl="$(sfdisk -d "$dev" 2>/dev/null | grep -E '^/dev/' || true)"
+if [ -n "$before_tbl" ]; then
+  while IFS= read -r l; do
+    [ -z "$l" ] && continue
+    printf '%s\n' "$after_tbl" | grep -qxF "$l" || {
+      warn "SAFETY CHECK FAILED — an existing partition changed:"
+      printf '      %s\n' "$l" >&2
+      warn "restoring the original table: sudo sgdisk --load-backup='$gpt_backup' $dev"
+      [ -f "$gpt_backup" ] && sgdisk --load-backup="$gpt_backup" "$dev" >/dev/null 2>&1 && partprobe "$dev" 2>/dev/null || true
+      die "aborted before formatting anything; your partitions are untouched"
+    }
+  done <<< "$before_tbl"
+  say "verified: every pre-existing partition (sdc1/sdc2/… and your data partition) is unchanged"
+fi
+
+mapfile -t newp < <(comm -13 <(printf '%s\n' "$before_names") <(lsblk -nro NAME "$dev" | sort))
+[ "${#newp[@]}" -eq 1 ] || die "expected exactly ONE new partition, found ${#newp[@]}; check 'lsblk $dev' (nothing formatted)"
 PP="/dev/${newp[0]}"
-say "formatting $PP ext4 (filesystem label 'persistence')"
+say "new partition created in free space: $PP — formatting ext4 (label 'persistence')"
 mkfs.ext4 -q -L persistence "$PP"
 write_conf "$PP"
 say "done: persistence partition = $PP"
