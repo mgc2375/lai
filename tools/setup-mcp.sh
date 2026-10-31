@@ -15,6 +15,9 @@
 # and they connect. Everything else works without keys.
 set -euo pipefail
 
+# where this script lives (…/lai/tools); local-py servers resolve against it
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 TOOLS_DIR="${TOOLS_DIR:-$HOME/.local/share/lai/mcp-tools}"
 ONLY=""
 LIST=0
@@ -197,7 +200,7 @@ for e in "${REGISTRY[@]}"; do
       ;;
     local-py) # a python MCP server that ships in this repo (tools/<arg>)
       ensure_apt python3 python3-venv python3-pip
-      local src="$HERE/$arg" sdir
+      src="$HERE/$arg"
       sdir="$(dirname "$src")"            # tools/captcha-free
       dir="$TOOLS_DIR/$id"
       mkdir -p "$dir"
