@@ -103,6 +103,12 @@ sudo reboot            # at the boot menu pick the entry that says "persistence"
 LAI_DISK=sdc ./install.sh --serve --mcp   # now / persists: driver installs and STAYS
 ```
 
+`LAI_DISK` also carves lai-data/lai-swap; to make **only** the persistence partition (keeping your existing data partition, e.g. `LAI_PERSIST=/dev/sdc3`, for lai's files + MCP tools), use `LAI_PERSIST_DISK=sdc` instead:
+
+```sh
+LAI_PERSIST=/dev/sdc3 LAI_PERSIST_DISK=sdc LAI_DISK_YES=1 ./install.sh --serve --mcp
+```
+
 Because live-boot finds the partition by its `persistence` **label**, it can sit in the free space of any disk. Sizes: `LAI_PERSIST_ROOT_SIZE` (default 6 GB — the driver + apt + `/home` are small; the model and lai's tools live elsewhere). With `/ union`, `/home` persists, so the big model is kept in RAM (`/dev/shm`) automatically unless you set `LAI_MODEL_DIR` to a data partition. Opt out of the whole thing with `LAI_SKIP_ROOT_PERSIST=1`; set it up by hand with `sudo bash tools/setup-persistence.sh sdc` (or `tools/persist-root.sh` to only edit an existing one).
 
 **The one step that can't be automated** is picking the "persistence" boot entry at the menu each boot — live-boot only honors `/ union` when you boot that entry. If it isn't your boot default you'll choose it after the driver's auto-reboot too. `install.sh` installs the driver + reboots **at most once per run**; if it still comes back on nouveau, you didn't boot the persistence entry (or persistence didn't take), and it stays on CPU. The only way to remove the boot-menu step entirely is a full install of Parrot to the stick rather than a live image.
