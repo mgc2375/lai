@@ -217,13 +217,29 @@ fit_gpu_layers() {
 # (nvidia-smi only works on the proprietary driver, not nouveau/NVK)
 nvidia_active() { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; }
 
-# persistent_boot: do changes to / survive a reboot? True when installed to
-# disk, or a live boot with persistence. Guards against a driver-install +
-# reboot loop on a pure-RAM live boot where the driver wouldn't come back.
-persistent_boot() {
+# root_persistent: do changes to / (where the GPU driver installs) survive a
+# reboot? True when installed to disk, or a live boot whose ROOT overlay's write
+# layer sits on a persistence volume (full '/ union' persistence) — NOT just any
+# persistence (a data-partition persistence doesn't keep the driver). Guards
+# against a futile driver-install + reboot that reverts to nouveau every time.
+root_persistent() {
   if ! grep -qw 'boot=live' /proc/cmdline 2>/dev/null && [ ! -d /run/live ]; then
     return 0                                   # not a live session -> installed to disk
   fi
+  local line upper src
+  line="$(awk '$2=="/"{print; exit}' /proc/mounts 2>/dev/null)"
+  case "$line" in *overlay*) ;; *) return 1 ;; esac
+  upper="$(printf '%s\n' "$line" | tr ',' '\n' | sed -n 's/^upperdir=//p' | head -1)"
+  [ -n "$upper" ] || return 1
+  case "$upper" in /run/live/persistence/*) return 0 ;; esac
+  command -v findmnt >/dev/null 2>&1 || return 1
+  src="$(findmnt -no SOURCE -T "$upper" 2>/dev/null || true)"
+  case "$src" in /dev/*) return 0 ;; *) return 1 ;; esac      # on a disk, not tmpfs/RAM
+}
+
+# live_persistence_present: a live boot has persistence enabled (even if it only
+# covers data, not root) — used to pick the right fix message.
+live_persistence_present() {
   grep -qw persistence /proc/cmdline 2>/dev/null && return 0
   [ -d /run/live/persistence ] && command -v findmnt >/dev/null 2>&1 \
     && findmnt -rn /run/live/persistence >/dev/null 2>&1
@@ -302,8 +318,12 @@ ensure_gpu_driver() {
     LAI_GPU=cpu
     return 0
   fi
-  if ! persistent_boot && [ "${LAI_FORCE_REBOOT:-}" != 1 ]; then
-    warn "this looks like a non-persistent live boot, so a driver install wouldn't survive the reboot (it would loop). Continuing on CPU. Boot a persistent/installed Parrot and rerun, or set LAI_FORCE_REBOOT=1 to override."
+  if ! root_persistent && [ "${LAI_FORCE_REBOOT:-}" != 1 ]; then
+    if live_persistence_present; then
+      warn "your live USB has persistence, but it doesn't cover the ROOT filesystem — so the GPU driver (installed into /) wouldn't survive a reboot. Turn on full root persistence first:  sudo bash tools/persist-root.sh  (then reboot into the persistence boot entry and rerun). Running on CPU for now; LAI_FORCE_REBOOT=1 overrides."
+    else
+      warn "this looks like a non-persistent live boot, so a driver install wouldn't survive the reboot. Turn on full root persistence:  sudo bash tools/persist-root.sh  (and boot the persistence menu entry). Running on CPU for now; LAI_FORCE_REBOOT=1 overrides."
+    fi
     LAI_GPU=cpu
     return 0
   fi
