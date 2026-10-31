@@ -231,6 +231,24 @@ On Qwen3-30B-A3B, about 51 KB per token with q8_0 (27 KB with q4_0): 6 GB gives 
 
 On a live boot, keep the `.gguf` on a drive rather than in your RAM home folder. A file in the RAM folder takes its full size in RAM even when lai isn't running. A file on a drive is only paged in as it's used, and the kernel can drop those pages again.
 
+## Debug
+
+**MCP setup failed / a server didn't install.** Pull the latest and re-run just the MCP setup (safe to re-run; it skips what's already done):
+
+```sh
+cd ~/lai && git pull && TOOLS_DIR=~/lai/mcp-tools bash tools/setup-mcp.sh
+```
+
+Then re-import into lai:
+
+```sh
+lai mcp import ~/lai/mcp-tools/mcp-servers.json
+```
+
+Install one server at a time to see its errors: `TOOLS_DIR=~/lai/mcp-tools bash tools/setup-mcp.sh --only captcha-free`. List what's registered: `tools/setup-mcp.sh --list`.
+
+**Logs.** Engine: `~/.local/share/lai/logs/engine.log`. Each MCP server's stderr: `~/.local/share/lai/logs/mcp-<name>.log`.
+
 ## Build by hand
 
 ```sh
