@@ -236,7 +236,53 @@ persistent_boot() {
 # is no NVIDIA GPU, CPU was requested, or a live boot can't keep the driver.
 #   LAI_GPU=cpu / LAI_SKIP_GPU_DRIVER=1  skip the whole check
 #   LAI_NO_REBOOT=1                      install the driver but don't auto-reboot
+#   LAI_NO_AUTORESUME=1                  don't auto-finish after the reboot
 #   LAI_FORCE_REBOOT=1                   reboot even on a non-persistent live boot
+
+# arm_autoresume ARGS...: after the driver reboot, finish the install on its own
+# via a desktop-autostart entry (Parrot live auto-logs in). The entry reruns the
+# same install, then deletes itself. Best-effort: if it can't be set up (no
+# writable autostart dir, non-persistent /home), the user just reruns the line.
+arm_autoresume() {
+  [ "${LAI_NO_AUTORESUME:-}" = 1 ] && return 1
+  local ru rh ad resume v
+  ru="${SUDO_USER:-$(id -un)}"
+  rh="$(getent passwd "$ru" 2>/dev/null | cut -d: -f6)"; [ -n "$rh" ] || rh="$HOME"
+  ad="$rh/.config/autostart"
+  resume="$HERE/.lai-resume.sh"
+  {
+    echo '#!/usr/bin/env bash'
+    echo '# auto-generated: finishes the lai install after the GPU-driver reboot'
+    echo 'set -u'
+    for v in LAI_PERSIST LAI_PERSIST_SWAP LAI_DISK LAI_DISK_YES LAI_DATA_SIZE LAI_SWAP_SIZE \
+             LAI_MODEL_DIR LAI_MODEL_URL LAI_DIR LAI_MCP LAI_MCP_ONLY LAI_GPU SWAP_DEV \
+             SOFT_CAP_GB RAMP_START_GB IDLE_MIN SWAP_SIZE ZRAM_SIZE ZRAM NGROK_AUTHTOKEN \
+             NGROK_DOMAIN SHODAN_API_KEY VIRUSTOTAL_API_KEY CM_API_KEY GEMINI_API_KEY \
+             BLOODHOUND_DOMAIN BLOODHOUND_TOKEN_ID BLOODHOUND_TOKEN_KEY; do
+      [ -n "${!v:-}" ] && printf 'export %s=%q\n' "$v" "${!v}"
+    done
+    printf 'rm -f %q\n' "$ad/lai-resume.desktop"           # don't run again
+    printf 'cd %q || exit 0\n' "$HERE"
+    printf 'command -v notify-send >/dev/null 2>&1 && notify-send lai "Finishing install (model + build)…" || true\n'
+    printf 'LAI_SKIP_GPU_DRIVER=1 ./install.sh'
+    for v in "$@"; do printf ' %q' "$v"; done
+    printf ' >> %q 2>&1\n' "$HERE/.lai-resume.log"
+    printf 'command -v notify-send >/dev/null 2>&1 && notify-send lai "Install finished." || true\n'
+    printf 'rm -f %q\n' "$resume"                           # self-delete (it holds the env/keys)
+  } > "$resume" 2>/dev/null || { warn "couldn't write the resume script; after the reboot rerun the install command to finish"; return 1; }
+  chmod 700 "$resume" 2>/dev/null || true
+  mkdir -p "$ad" 2>/dev/null || true
+  cat > "$ad/lai-resume.desktop" 2>/dev/null <<EOF || { warn "couldn't arm auto-resume (no writable autostart dir); after the reboot rerun the install command to finish"; return 1; }
+[Desktop Entry]
+Type=Application
+Name=Finish lai install
+Exec=$resume
+Terminal=false
+X-GNOME-Autostart-enabled=true
+EOF
+  return 0
+}
+
 ensure_gpu_driver() {
   [ "${LAI_GPU:-}" = cpu ] && return 0
   [ "${LAI_SKIP_GPU_DRIVER:-}" = 1 ] && return 0
@@ -270,11 +316,28 @@ ensure_gpu_driver() {
   fi
   : > "$marker" 2>/dev/null || true
 
+  # pre-install the build toolchain now, while we have sudo, so the post-reboot
+  # finish needs no password
+  say "pre-installing build tools so the finish-after-reboot is hands-off"
+  $SUDO apt-get install -y -qq build-essential cmake git libvulkan-dev glslc spirv-headers \
+    vulkan-tools python3 python3-venv python3-pip nodejs npm golang-go >/dev/null 2>&1 || true
+
+  local resumed=1
+  arm_autoresume "$@" || resumed=0
+
   if [ "${LAI_NO_REBOOT:-}" = 1 ]; then
-    say "driver installed. Reboot, then rerun this exact command to finish (model download, build, config)."
+    if [ "$resumed" = 1 ]; then
+      say "driver installed. It'll finish on its own the next time you reboot and log in — nothing to type."
+    else
+      say "driver installed. Reboot, then rerun this exact command to finish."
+    fi
     exit 0
   fi
-  warn "driver installed — rebooting in 10s to load it. Rerun this same command after the reboot to finish. Ctrl-C to cancel; set LAI_NO_REBOOT=1 to skip the auto-reboot."
+  if [ "$resumed" = 1 ]; then
+    warn "driver installed — rebooting in 10s. It finishes on its own after the reboot (desktop auto-login); you don't need to run anything. Progress: $HERE/.lai-resume.log. Ctrl-C to cancel."
+  else
+    warn "driver installed — rebooting in 10s to load it. Rerun this same command after the reboot to finish. Ctrl-C to cancel; LAI_NO_REBOOT=1 skips the auto-reboot."
+  fi
   sleep 10
   $SUDO reboot
   exit 0
@@ -466,7 +529,7 @@ main() {
   #    this installs the proprietary driver and reboots; we only reach the model
   #    download below once the right driver is active (or on CPU if there's no
   #    GPU / it can't be fixed here).
-  ensure_gpu_driver
+  ensure_gpu_driver "$@"
 
   # 1. model
   local model="" serve=0 find=0 setup_mcp=0 memguard=0 do_tools=0 a
