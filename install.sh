@@ -152,6 +152,67 @@ pick_gpu() {
   fi
 }
 
+# gpu_vram_mb: total VRAM (MB) of the first NVIDIA GPU, or empty if unknown
+gpu_vram_mb() {
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+  nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc '0-9'
+}
+
+# gguf_block_count FILE: transformer-layer count from the GGUF header, or empty
+gguf_block_count() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import struct, sys
+try:
+    f = open(sys.argv[1], "rb")
+    if f.read(4) != b"GGUF":
+        sys.exit(0)
+    f.read(4)                                   # version
+    f.read(8)                                   # tensor count
+    n_kv = struct.unpack("<Q", f.read(8))[0]
+    def rd(fmt): return struct.unpack(fmt, f.read(struct.calcsize(fmt)))[0]
+    def rstr(): return f.read(rd("<Q"))
+    SZ = {0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:4, 7:1, 10:8, 11:8, 12:8}
+    def skip(t):
+        if t in SZ: f.read(SZ[t])
+        elif t == 8: rstr()
+        elif t == 9:
+            et = rd("<I"); n = rd("<Q")
+            for _ in range(n): skip(et)
+        else: raise ValueError(t)
+    for _ in range(n_kv):
+        key = rstr().decode("utf-8", "replace")
+        t = rd("<I")
+        if key.endswith(".block_count"):
+            fmt = {0:"<B", 1:"<b", 2:"<H", 3:"<h", 4:"<I", 5:"<i", 10:"<Q", 11:"<q"}.get(t)
+            if fmt: print(int(rd(fmt)))
+            break
+        skip(t)
+except Exception:
+    pass
+PY
+}
+
+# fit_gpu_layers MODEL VRAM_MB: how many layers to offload so the weights fit
+# VRAM (the KV cache stays in RAM). Conservative — errs low. Empty if unknown.
+fit_gpu_layers() {
+  local model="$1" vram="${2:-}" layers model_mb reserve budget per n
+  case "$vram" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$vram" -gt 0 ] || return 0
+  model_mb="$(file_mb "$model")"
+  reserve=1024                                  # compute buffer + headroom (KV is in RAM)
+  budget=$(( vram - reserve )); [ "$budget" -lt 0 ] && budget=0
+  layers="$(gguf_block_count "$model")"
+  if [ -n "$layers" ] && [ "$layers" -gt 0 ] 2>/dev/null; then
+    per=$(( (model_mb + layers - 1) / layers )); [ "$per" -lt 1 ] && per=1
+    n=$(( budget / per )); [ "$n" -gt "$layers" ] && n="$layers"
+  else
+    n=$(( budget * 40 / (model_mb + 1) ))       # no layer count: assume ~40, err low
+  fi
+  [ "$n" -lt 0 ] && n=0
+  echo "$n"
+}
+
 # build_engine WORK [cmake flags...]: configure and compile lai-engine,
 # printing the relevant part of the log on failure
 build_engine() {
@@ -198,10 +259,11 @@ install_engine() {
 
 # gpu_works ENGINE MODEL: generate one token on the GPU build. Some drivers
 # build fine but lose the device as soon as real work starts.
-gpu_works() {
-  local out
+gpu_works() { # ENGINE MODEL [NGL]
+  local out ngl=()
+  [ -n "${3:-}" ] && ngl=(-ngl "$3")
   out="$(printf '%s\n' '{"messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
-         | timeout 900 "$1" -m "$2" -c 1024 --cpu-moe --kv q8_0 --ubatch 256 2>/dev/null || true)"
+         | timeout 900 "$1" -m "$2" -c 1024 ${ngl[@]+"${ngl[@]}"} --cpu-moe --kv q8_0 --ubatch 256 2>/dev/null || true)"
   case "$out" in
     *'"done"'*) return 0 ;;
     *) return 1 ;;
@@ -262,6 +324,11 @@ if changed:
         old.pop(k, None)
         if k in new:
             old[k] = new[k]
+# gpu_layers is machine-derived (sized to this box's VRAM): always mirror new
+if "gpu_layers" in new:
+    old["gpu_layers"] = new["gpu_layers"]
+else:
+    old.pop("gpu_layers", None)
 if domain:
     old["ngrok_domain"] = domain
 json.dump(old, open(old_path, "w"), indent=2)
@@ -273,7 +340,7 @@ json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 # write_config FILE MODEL GPU: settings sized to this machine
 write_config() {
-  local cfg="$1" model="$2" gpu="$3" ram_mb model_mb kv sampling="" extra=""
+  local cfg="$1" model="$2" gpu="$3" ngl="${4:-}" ram_mb model_mb kv sampling="" extra="" gpu_line=""
   if [ -n "${NGROK_DOMAIN:-}" ]; then
     extra="
   \"ngrok_domain\": \"$(json_escape "$NGROK_DOMAIN")\","
@@ -300,6 +367,9 @@ write_config() {
   "min_p": 0,
   "repeat_penalty": 1.05,' ;;
   esac
+  # partial GPU offload, sized to VRAM; absent for CPU builds (engine default)
+  case "$ngl" in ''|*[!0-9]*) ;; *) [ "$gpu" != cpu ] && gpu_line="
+  \"gpu_layers\": $ngl," ;; esac
   cat > "$cfg" <<EOF
 {
   "model": "$(json_escape "$model")",
@@ -307,7 +377,7 @@ write_config() {
   "kv_cache": "q8_0",
   "kv_in_ram": true,
   "kv_limit_mb": $kv,
-  "moe_on_cpu": true,$sampling
+  "moe_on_cpu": true,$gpu_line$sampling
   "auto_approve": true,$extra
   "mcpServers": {}
 }
@@ -413,13 +483,18 @@ main() {
     fi
   fi
 
+  local ngl=""
   if [ "$gpu" != cpu ]; then
+    # size the offload to VRAM so a card smaller than the model still works
+    # (and so the test below doesn't OOM by loading every layer onto the GPU)
+    ngl="$(fit_gpu_layers "$model" "$(gpu_vram_mb)")"
+    [ -n "$ngl" ] && say "GPU offload sized to your VRAM: $ngl layers"
     say "testing the $gpu build on your model (loads it once, can take a minute)"
-    if gpu_works "$dir/lai-engine" "$model"; then
+    if gpu_works "$dir/lai-engine" "$model" "$ngl"; then
       say "the GPU works"
     else
-      warn "the $gpu build crashed on your GPU (driver problem); rebuilding for CPU"
-      gpu=cpu
+      warn "the $gpu build didn't run on your GPU; rebuilding for CPU (see ${TMPDIR:-/tmp}/lai-build and ~/.local/share/lai/logs/engine.log)"
+      gpu=cpu; ngl=""
       install_engine "$dir" cpu || die "CPU build failed (logs in ${TMPDIR:-/tmp}/lai-build)"
     fi
   fi
@@ -427,12 +502,12 @@ main() {
   # 6. config: written once, then only updated when the model changes
   local kv
   if [ -f "$dir/config.json" ] && command -v python3 >/dev/null 2>&1; then
-    kv="$(write_config "$dir/config.json.new" "$model" "$gpu")"
+    kv="$(write_config "$dir/config.json.new" "$model" "$gpu" "$ngl")"
     say "config: $(merge_config "$dir/config.json" "$dir/config.json.new" "$model")"
     rm -f "$dir/config.json.new"
   else
     [ -f "$dir/config.json" ] && mv "$dir/config.json" "$dir/config.json.bak"
-    kv="$(write_config "$dir/config.json" "$model" "$gpu")"
+    kv="$(write_config "$dir/config.json" "$model" "$gpu" "$ngl")"
     say "wrote $dir/config.json (context cache up to ${kv} MB in RAM)"
   fi
 

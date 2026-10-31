@@ -111,7 +111,7 @@ Once the proprietary driver is in, `./install.sh` detects the GPU on its own (Vu
 
 **Live-boot caveat:** the driver writes to the root filesystem and builds a kernel module, so it only survives a reboot on a **persistent/installed** Parrot whose persistence covers the *root* overlay. On a pure-RAM live boot it's gone next boot (so lai is back on CPU). Install Parrot to disk, or use full root persistence, if you want the GPU to stick.
 
-**4 GB cards (e.g. GTX 1650):** a 7–9B model doesn't fully fit in 4 GB VRAM. lai still uses the GPU, but for a dense model bigger than your VRAM set a partial offload in `~/.config/lai/config.json` — e.g. `"gpu_layers": 20`, raised until VRAM is nearly full (watch `nvidia-smi`). Prompt processing speeds up the most; the KV cache can stay in RAM (`"kv_in_ram": true`) to leave room for weights.
+**4 GB cards (e.g. GTX 1650):** a 7–9B model doesn't fully fit in 4 GB VRAM, so lai offloads only as many layers as fit. `install.sh` sizes this for you — it reads your VRAM (`nvidia-smi`) and the model's layer count and writes a fitting `gpu_layers` into `config.json` (the KV cache stays in RAM so the weights get the VRAM). The estimate errs low; raise `gpu_layers` by hand until VRAM is nearly full (watch `nvidia-smi`) for a bit more speed. Prompt processing benefits the most; token generation is a smaller gain than a card that holds the whole model.
 
 ## Use
 
@@ -266,7 +266,17 @@ lai mcp import ~/lai/mcp-tools/mcp-servers.json
 
 Install one server at a time to see its errors: `TOOLS_DIR=~/lai/mcp-tools bash tools/setup-mcp.sh --only captcha-free`. List what's registered: `tools/setup-mcp.sh --list`.
 
-**Running on CPU despite having a GPU?** The open-source nouveau/NVK driver crashes on this workload, so lai falls back to CPU on purpose. Install the proprietary NVIDIA driver and rebuild — see [GPU: use the proprietary NVIDIA driver](#gpu-use-the-proprietary-nvidia-driver).
+**Running on CPU despite having a GPU?** Two common causes. (1) The GPU is on the open-source **nouveau/NVK** driver, which crashes on this workload — install the proprietary driver (see [GPU: use the proprietary NVIDIA driver](#gpu-use-the-proprietary-nvidia-driver)). (2) The driver is fine but the GPU self-test fell back to CPU. Check what happened:
+
+```sh
+cat ~/lai/.lai-engine-build; nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+```
+
+```sh
+grep -iE 'gpu|vulkan|cuda|device|out of memory|error|ctx' ~/.local/share/lai/logs/engine.log | tail -20
+```
+
+The first line shows whether the engine was built for `vulkan`/`cuda` or `cpu`, plus your VRAM and driver. `install.sh` sizes GPU offload to your VRAM automatically (`gpu_layers` in `config.json`) so a card smaller than the model still works — if that number is `0` or missing on a GPU build, your VRAM wasn't detected (`nvidia-smi` missing); set `gpu_layers` by hand. Force the backend with `LAI_GPU=vulkan ./install.sh` (or `cuda`).
 
 **Logs.** Engine: `~/.local/share/lai/logs/engine.log`. Each MCP server's stderr: `~/.local/share/lai/logs/mcp-<name>.log`.
 
