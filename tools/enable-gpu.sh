@@ -21,8 +21,13 @@ say()  { printf '\033[1m  ->\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m  warning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m  error:\033[0m %s\n' "$*" >&2; exit 1; }
 
-WITH_CUDA=0
-[ "${1:-}" = "--cuda" ] && WITH_CUDA=1
+WITH_CUDA=0; FROM_INSTALL=0
+for a in "$@"; do
+  case "$a" in
+    --cuda) WITH_CUDA=1 ;;
+    --from-install) FROM_INSTALL=1 ;;   # called by install.sh: it handles the reboot
+  esac
+done
 
 SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO=sudo
 command -v apt-get >/dev/null 2>&1 || die "this helper is for Debian/Parrot (apt). Install the NVIDIA driver your distro's way, then rerun ./install.sh"
@@ -57,6 +62,11 @@ if [ "$WITH_CUDA" = 1 ]; then
 fi
 
 $SUDO apt-get clean  # drop the .debs (they sit in RAM on a live boot)
+
+if [ "$FROM_INSTALL" = 1 ]; then
+  say "proprietary driver installed (nouveau unloads on reboot); install.sh will reboot"
+  exit 0
+fi
 
 cat <<'DONE'
 

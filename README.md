@@ -82,13 +82,14 @@ cd ~/lai && git pull && ./install.sh --serve --mcp
 
 What it does, skipping anything already done:
 
+0. **GPU driver (first, before any download):** if an NVIDIA GPU is on the open-source nouveau driver, installs the proprietary driver and reboots automatically, then you rerun to finish. See [GPU](#gpu-use-the-proprietary-nvidia-driver). Skipped if the driver's already good, there's no NVIDIA GPU, or `LAI_GPU=cpu`.
 1. **Model:** downloads [Huihui-Qwen3.5-9B-abliterated Q6_K](https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF) (7.4 GB, resumable). Use your own with `./install.sh /path/to/model.gguf`, or `--find` to search your drives.
 2. **Engine:** installs build tools (then clears apt's cache) and builds `lai-engine` against llama.cpp `b11982` — Vulkan if a working discrete GPU is found, else CPU, with a CPU fallback if a GPU build crashes.
 3. **Config:** writes `config.json` (context sized to your RAM, the model's recommended sampling, auto-approve on). Reruns keep your settings and only refresh the model-specific ones when the model changes.
 4. **`--mcp`:** clones, builds and registers every MCP server in the registry (see below) and starts their backends.
 5. **ngrok + `--serve`:** installs ngrok, saves the authtoken, starts the tunnel and prints the phone login link. (Comes set up with a test ngrok account; override with `NGROK_AUTHTOKEN=` / `NGROK_DOMAIN=`, or drop `--serve` to stay terminal-only.)
 
-Leave off `--mcp` for just the agent, or `--serve` for terminal-only. Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP` (import an existing OpenCode/Claude config too), `LAI_PERSIST`, `LAI_MCP_ONLY=hexstrike,kali,…`, `--memguard` (+ `SWAP_DEV`, `SOFT_CAP_GB`, `RAMP_START_GB`, `IDLE_MIN`, `SWAP_SIZE`), `LAI_GPU=cpu|vulkan|cuda|rocm`.
+Leave off `--mcp` for just the agent, or `--serve` for terminal-only. Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP` (import an existing OpenCode/Claude config too), `LAI_PERSIST`, `LAI_MCP_ONLY=hexstrike,kali,…`, `--memguard` (+ `SWAP_DEV`, `SOFT_CAP_GB`, `RAMP_START_GB`, `IDLE_MIN`, `SWAP_SIZE`), `LAI_GPU=cpu|vulkan|cuda|rocm`, and the driver gate `LAI_NO_REBOOT`, `LAI_SKIP_GPU_DRIVER`, `LAI_FORCE_REBOOT` (see [GPU](#gpu-use-the-proprietary-nvidia-driver)).
 
 ### Parrot OS notes
 
@@ -96,20 +97,27 @@ Built and tested against Parrot/Debian conventions: apt for packages, cgroup v2 
 
 ### GPU: use the proprietary NVIDIA driver
 
-If the install says *"your NVIDIA GPU is on the open-source nouveau/NVK driver … building for CPU"*, that's lai protecting you: NVK (nouveau's Vulkan) **loses the device under llama.cpp's compute and crashes the session**, so lai correctly falls back to CPU. It isn't a lai bug — the fix is the proprietary driver.
+An NVIDIA GPU on the open-source **nouveau/NVK** driver **loses the device under llama.cpp's compute and crashes the session**, so lai can't use it — it falls back to CPU. The fix is the proprietary driver, and **`install.sh` now handles this for you before anything is downloaded:**
 
-Install it, reboot, then rebuild:
+1. The very first thing `install.sh` does is check the GPU driver. If it finds an NVIDIA card on nouveau, it installs the proprietary driver and **reboots automatically** (10-second cancelable countdown) — *before* downloading the 7.4 GB model, so nothing is wasted.
+2. After the reboot, rerun the same command. The driver is now active, so it skips straight past the driver step and downloads the model, builds for the GPU, and configures everything.
+
+So on a fresh box it's just:
 
 ```sh
-sudo bash tools/enable-gpu.sh
-sudo reboot
-# after reboot:
-cd ~/lai && ./install.sh --serve
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && ./install.sh --serve --mcp
+# it installs the driver and reboots; rerun the same line after reboot to finish
 ```
 
-Once the proprietary driver is in, `./install.sh` detects the GPU on its own (Vulkan), tests it on your model, and builds for the GPU. Add `--cuda` to the helper (`sudo bash tools/enable-gpu.sh --cuda`) if you want a CUDA build (`LAI_GPU=cuda`) instead of Vulkan; it's a bigger download and usually not needed.
+Knobs:
 
-**Live-boot caveat:** the driver writes to the root filesystem and builds a kernel module, so it only survives a reboot on a **persistent/installed** Parrot whose persistence covers the *root* overlay. On a pure-RAM live boot it's gone next boot (so lai is back on CPU). Install Parrot to disk, or use full root persistence, if you want the GPU to stick.
+- `LAI_NO_REBOOT=1` — install the driver but don't auto-reboot (you reboot when ready).
+- `LAI_SKIP_GPU_DRIVER=1` — never touch the driver (e.g. you manage it yourself).
+- `LAI_GPU=cpu` — force CPU; skips the driver check entirely.
+- `LAI_FORCE_REBOOT=1` — reboot even when the boot looks non-persistent (see caveat).
+- Driver only, by hand: `sudo bash tools/enable-gpu.sh` (add `--cuda` for a CUDA toolkit / `LAI_GPU=cuda` build instead of Vulkan — bigger, usually unneeded).
+
+**Live-boot caveat (important):** the driver writes to the root filesystem and builds a kernel module, so it only survives a reboot on a **persistent/installed** Parrot whose persistence covers the *root* overlay. On a pure-RAM live boot it's gone next boot. To avoid a reboot loop, `install.sh` **won't auto-reboot on a boot it detects as non-persistent** — it stays on CPU and tells you. It also installs + reboots **at most once**: if it comes back still on nouveau (persistence didn't keep the driver), it stops retrying and runs on CPU. Install Parrot to disk, or use full root persistence, if you want the GPU to stick.
 
 **4 GB cards (e.g. GTX 1650):** a 7–9B model doesn't fully fit in 4 GB VRAM, so lai offloads only as many layers as fit. `install.sh` sizes this for you — it reads your VRAM (`nvidia-smi`) and the model's layer count and writes a fitting `gpu_layers` into `config.json` (the KV cache stays in RAM so the weights get the VRAM). The estimate errs low; raise `gpu_layers` by hand until VRAM is nearly full (watch `nvidia-smi`) for a bit more speed. Prompt processing benefits the most; token generation is a smaller gain than a card that holds the whole model.
 

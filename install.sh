@@ -213,6 +213,73 @@ fit_gpu_layers() {
   echo "$n"
 }
 
+# nvidia_active: the proprietary NVIDIA driver is loaded and the GPU responds
+# (nvidia-smi only works on the proprietary driver, not nouveau/NVK)
+nvidia_active() { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; }
+
+# persistent_boot: do changes to / survive a reboot? True when installed to
+# disk, or a live boot with persistence. Guards against a driver-install +
+# reboot loop on a pure-RAM live boot where the driver wouldn't come back.
+persistent_boot() {
+  if ! grep -qw 'boot=live' /proc/cmdline 2>/dev/null && [ ! -d /run/live ]; then
+    return 0                                   # not a live session -> installed to disk
+  fi
+  grep -qw persistence /proc/cmdline 2>/dev/null && return 0
+  [ -d /run/live/persistence ] && command -v findmnt >/dev/null 2>&1 \
+    && findmnt -rn /run/live/persistence >/dev/null 2>&1
+}
+
+# ensure_gpu_driver: run BEFORE downloading anything. If the box has an NVIDIA
+# GPU on the open-source nouveau driver (which crashes this workload), install
+# the proprietary driver and reboot — so the model download and build happen on
+# the right driver, not twice. Returns (continuing on CPU, no reboot) when there
+# is no NVIDIA GPU, CPU was requested, or a live boot can't keep the driver.
+#   LAI_GPU=cpu / LAI_SKIP_GPU_DRIVER=1  skip the whole check
+#   LAI_NO_REBOOT=1                      install the driver but don't auto-reboot
+#   LAI_FORCE_REBOOT=1                   reboot even on a non-persistent live boot
+ensure_gpu_driver() {
+  [ "${LAI_GPU:-}" = cpu ] && return 0
+  [ "${LAI_SKIP_GPU_DRIVER:-}" = 1 ] && return 0
+  command -v lspci >/dev/null 2>&1 || return 0
+  lspci 2>/dev/null | grep -iE 'vga|3d|display' | grep -qi nvidia || return 0
+
+  local marker="$HERE/.lai-driver-attempted"
+  if nvidia_active; then
+    say "proprietary NVIDIA driver active"
+    rm -f "$marker" 2>/dev/null || true
+    return 0
+  fi
+
+  warn "your NVIDIA GPU is on the open-source nouveau/NVK driver, which crashes under llama.cpp compute"
+  if [ -f "$marker" ]; then
+    warn "the driver was installed and the box rebooted once, but it's still on nouveau — this live boot isn't keeping the driver across reboots. Continuing on CPU. Install Parrot to disk (or enable root persistence) to use the GPU; set LAI_SKIP_GPU_DRIVER=1 to silence this."
+    LAI_GPU=cpu
+    return 0
+  fi
+  if ! persistent_boot && [ "${LAI_FORCE_REBOOT:-}" != 1 ]; then
+    warn "this looks like a non-persistent live boot, so a driver install wouldn't survive the reboot (it would loop). Continuing on CPU. Boot a persistent/installed Parrot and rerun, or set LAI_FORCE_REBOOT=1 to override."
+    LAI_GPU=cpu
+    return 0
+  fi
+
+  say "installing the proprietary NVIDIA driver first — before downloading the model, so nothing is wasted across the reboot"
+  if ! bash "$HERE/tools/enable-gpu.sh" --from-install; then
+    warn "driver install failed; continuing on CPU (see the apt output above). Retry by hand with: sudo bash tools/enable-gpu.sh"
+    LAI_GPU=cpu
+    return 0
+  fi
+  : > "$marker" 2>/dev/null || true
+
+  if [ "${LAI_NO_REBOOT:-}" = 1 ]; then
+    say "driver installed. Reboot, then rerun this exact command to finish (model download, build, config)."
+    exit 0
+  fi
+  warn "driver installed — rebooting in 10s to load it. Rerun this same command after the reboot to finish. Ctrl-C to cancel; set LAI_NO_REBOOT=1 to skip the auto-reboot."
+  sleep 10
+  $SUDO reboot
+  exit 0
+}
+
 # build_engine WORK [cmake flags...]: configure and compile lai-engine,
 # printing the relevant part of the log on failure
 build_engine() {
@@ -394,6 +461,12 @@ main() {
   esac
   SUDO=""
   [ "$(id -u)" -eq 0 ] || SUDO=sudo
+
+  # 0. GPU driver gate — before any download. On an NVIDIA GPU stuck on nouveau,
+  #    this installs the proprietary driver and reboots; we only reach the model
+  #    download below once the right driver is active (or on CPU if there's no
+  #    GPU / it can't be fixed here).
+  ensure_gpu_driver
 
   # 1. model
   local model="" serve=0 find=0 setup_mcp=0 memguard=0 do_tools=0 a

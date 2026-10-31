@@ -10,3 +10,4 @@ serve.key
 /.lai-engine-build
 config.json.bak
 config.json.new
+.lai-driver-attempted
