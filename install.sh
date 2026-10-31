@@ -245,6 +245,50 @@ live_persistence_present() {
     && findmnt -rn /run/live/persistence >/dev/null 2>&1
 }
 
+# ensure_root_persistence: run BEFORE the driver gate. On a live boot where /
+# doesn't persist, set up full root persistence so the GPU driver (and apt, and
+# /home) survive reboots — reusing a 'persistence'-labelled partition if present,
+# else carving a DEDICATED one from the free space of $LAI_DISK via
+# tools/setup-persistence.sh. It then stops and asks for a reboot into the
+# persistence entry, since nothing should install onto a non-persistent /.
+# Never touches the LAI_PERSIST data partition. Skip with LAI_SKIP_ROOT_PERSIST=1.
+ensure_root_persistence() {
+  [ "${LAI_SKIP_ROOT_PERSIST:-}" = 1 ] && return 0
+  grep -qw 'boot=live' /proc/cmdline 2>/dev/null || return 0       # installed to disk: nothing to do
+  root_persistent && return 0                                       # / already persists
+
+  local disk="${LAI_DISK:-${LAI_PERSIST_DISK:-}}" have_pp out dev
+  have_pp="$(blkid -L persistence 2>/dev/null || true)"
+  if [ -z "$have_pp" ] && [ -z "$disk" ]; then
+    warn "to make the GPU driver persist on this live USB, lai needs a dedicated 'persistence' partition. Point LAI_DISK at a disk with free space and I'll carve one from it, e.g.:  LAI_DISK=sdc ./install.sh --serve --mcp  (add LAI_DISK_YES=1 to skip the confirm). Running on CPU for now."
+    LAI_GPU=cpu
+    return 0
+  fi
+
+  local where="reusing the existing persistence partition"
+  [ -n "$disk" ] && where="free space of $disk"
+  say "setting up full root persistence so the GPU driver survives reboots ($where)"
+  if ! out="$($SUDO bash "$HERE/tools/setup-persistence.sh" ${disk:+"$disk"} "${LAI_PERSIST_ROOT_SIZE:-6G}")"; then
+    warn "couldn't set up root persistence (see above). Running on CPU; set it up by hand: sudo bash tools/setup-persistence.sh sdX"
+    LAI_GPU=cpu
+    return 0
+  fi
+  dev="$(printf '%s\n' "$out" | sed -n 's/^LAI_PERSISTENCE_DEV=//p' | tail -1)"
+
+  cat >&2 <<EOF
+
+  ->  Root persistence is set up${dev:+ on $dev}. It activates on the NEXT boot of the
+      "persistence" entry. Finish with:
+
+        1) sudo reboot
+        2) in the boot menu choose the entry that says "persistence"
+        3) cd $HERE && ./install.sh $*
+
+      From there the driver installs and STAYS, and the rest runs on its own.
+EOF
+  exit 0
+}
+
 # ensure_gpu_driver: run BEFORE downloading anything. If the box has an NVIDIA
 # GPU on the open-source nouveau driver (which crashes this workload), install
 # the proprietary driver and reboot — so the model download and build happen on
@@ -545,10 +589,16 @@ main() {
   SUDO=""
   [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
-  # 0. GPU driver gate — before any download. On an NVIDIA GPU stuck on nouveau,
-  #    this installs the proprietary driver and reboots; we only reach the model
-  #    download below once the right driver is active (or on CPU if there's no
-  #    GPU / it can't be fixed here).
+  # 0a. Root persistence — on a live USB, make sure / persists (via a dedicated
+  #     'persistence' partition carved from LAI_DISK's free space) so the driver
+  #     survives reboots. Stops for a reboot into the persistence entry if it had
+  #     to set it up. No-op on an installed Parrot or when / already persists.
+  ensure_root_persistence "$@"
+
+  # 0b. GPU driver gate — before any download. On an NVIDIA GPU stuck on nouveau,
+  #     this installs the proprietary driver and reboots; we only reach the model
+  #     download below once the right driver is active (or on CPU if there's no
+  #     GPU / it can't be fixed here).
   ensure_gpu_driver "$@"
 
   # 1. model
@@ -584,6 +634,17 @@ main() {
   fi
   [ -n "${LAI_SETUP_MCP:-}" ] && setup_mcp=1
   [ -n "${LAI_MEMGUARD:-}" ] && memguard=1
+
+  # full root persistence persists /home onto the (small) persistence partition,
+  # so keep the big model off it — default it to RAM unless it's on a data disk
+  if grep -qw 'boot=live' /proc/cmdline 2>/dev/null && root_persistent; then
+    case "${LAI_MODEL_DIR:-}" in
+      ""|"$HOME"|"$HOME"/*|"$HERE"|"$HERE"/*)
+        warn "root persistence is on — keeping the model in RAM (/dev/shm/lai-models) so it doesn't fill the persistence partition. Set LAI_MODEL_DIR=<data-partition>/models (e.g. on sdc3) to keep it on disk."
+        LAI_MODEL_DIR=/dev/shm/lai-models ;;
+    esac
+  fi
+
   local dir_default="$HERE"
   if [ -n "$model" ]; then
     dir_default="$(dirname "$model")/lai"

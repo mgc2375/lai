@@ -15,7 +15,16 @@ One line clones lai, sorts out the GPU driver, downloads the model, builds the e
 git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && ./install.sh --serve --mcp
 ```
 
-It does the **GPU driver first, before downloading anything.** On an NVIDIA card stuck on the open-source nouveau driver it installs the proprietary driver and reboots, then **finishes on its own after the reboot** (desktop auto-login) — run the one line and walk away. If the driver's already good, or there's no NVIDIA GPU, it goes straight to the model. (If the auto-finish can't run — e.g. a non-persistent live boot — just run the same line again after the reboot. See [GPU](#gpu-use-the-proprietary-nvidia-driver).)
+It does the **GPU driver first, before downloading anything.** On an NVIDIA card stuck on the open-source nouveau driver it installs the proprietary driver and reboots, then **finishes on its own after the reboot** (desktop auto-login) — run the one line and walk away. If the driver's already good, or there's no NVIDIA GPU, it goes straight to the model.
+
+**On a live USB** the driver (and `/`) can't survive a reboot without root persistence, so point `LAI_DISK` at a disk with free space and `install.sh` carves a `persistence` partition from it automatically (step 0a), before anything else:
+
+```sh
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
+  LAI_DISK=sdc LAI_DISK_YES=1 ./install.sh --serve --mcp
+```
+
+The one unavoidable manual step on a live USB is picking the **"persistence"** entry in the boot menu after each reboot — see [GPU / live USB](#gpu-use-the-proprietary-nvidia-driver) for the full flow.
 
 **Keys** are optional — servers that need one stay dormant until it's set. Put them right before the command:
 
@@ -45,7 +54,7 @@ cd ~/lai && git pull && ./install.sh --serve --mcp
 
 ### Live USB: keep it across reboots (persistence, storage, swap)
 
-On a live boot nothing survives a reboot unless it's on a partition — **including the GPU driver**, which needs **full root persistence** (`sudo bash tools/persist-root.sh`; see the [GPU section](#gpu-use-the-proprietary-nvidia-driver)). A `LAI_PERSIST` data partition keeps lai's files but not the driver. To carve lai's data + swap out of a disk's free space and keep everything across reboots:
+On a live boot nothing survives a reboot unless it's on a partition — **including the GPU driver**, which needs **full root persistence** (a `persistence`-labelled partition with `/ union`). `install.sh` sets that up automatically from `LAI_DISK`'s free space (step 0a; see the [GPU section](#gpu-use-the-proprietary-nvidia-driver)). A `LAI_PERSIST` data partition keeps lai's files but not the driver. To also carve lai's data + swap out of a disk's free space:
 
 ```sh
 LAI_DISK=sdc ./install.sh --serve --mcp --memguard --tools
@@ -56,7 +65,7 @@ LAI_DISK=sdc ./install.sh --serve --mcp --memguard --tools
 - **`--memguard`** fits a big model in limited RAM: compressed zram swap in front of disk swap, graded `vm.swappiness`, a cgroup `memory.high` cap, and an idle cache drop. Tune `SWAP_DEV`, `SOFT_CAP_GB`, `RAMP_START_GB`, `IDLE_MIN`, `SWAP_SIZE`, `ZRAM_SIZE`; stop it with `sudo pkill -f memguard.sh`. On an **NTFS** data disk (where swapfiles don't work) make a swap partition once: `sudo bash tools/make-swap.sh sdb 24G`.
 - **`--tools`** pre-installs ~30 common pentest tools Parrot doesn't ship and drops on-demand shims for the rest (installed on first use).
 
-Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP` (import an existing OpenCode/Claude config), `LAI_MCP_ONLY=hexstrike,kali,…`, `LAI_GPU=cpu|vulkan|cuda|rocm`, and the driver-gate knobs `LAI_NO_REBOOT`, `LAI_NO_AUTORESUME`, `LAI_SKIP_GPU_DRIVER`, `LAI_FORCE_REBOOT` (see [GPU](#gpu-use-the-proprietary-nvidia-driver)).
+Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP` (import an existing OpenCode/Claude config), `LAI_MCP_ONLY=hexstrike,kali,…`, `LAI_GPU=cpu|vulkan|cuda|rocm`, the persistence knobs `LAI_PERSIST_ROOT_SIZE` (default 6G), `LAI_SKIP_ROOT_PERSIST`, and the driver-gate knobs `LAI_NO_REBOOT`, `LAI_NO_AUTORESUME`, `LAI_SKIP_GPU_DRIVER`, `LAI_FORCE_REBOOT` (see [GPU](#gpu-use-the-proprietary-nvidia-driver)).
 
 ### Parrot OS notes
 
@@ -84,15 +93,19 @@ Knobs:
 - `LAI_FORCE_REBOOT=1` — reboot even when the boot looks non-persistent (see caveat).
 - Driver only, by hand: `sudo bash tools/enable-gpu.sh` (add `--cuda` for a CUDA build instead of Vulkan — bigger, usually unneeded).
 
-**Live USB — turn on full root persistence first.** The driver installs into the root filesystem (`/`), and a live USB only keeps `/` across reboots with **full root persistence** (`/ union`). A `LAI_PERSIST` data partition keeps *lai's* files but **not** the driver, so without root persistence the GPU reverts to nouveau every boot. `install.sh` checks for this: if root isn't persistent it **won't reboot** (that would just loop) — it runs on CPU and tells you to fix persistence. One-time fix:
+**Live USB — root persistence is set up for you.** The driver installs into the root filesystem (`/`), and a live USB only keeps `/` across reboots with **full root persistence** (`/ union`). Your `LAI_PERSIST` *data* partition keeps lai's files but **not** `/`, so without root persistence the GPU reverts to nouveau every boot. On a live boot where `/` isn't persistent, `install.sh` **carves a dedicated `persistence` partition from the free space of `LAI_DISK`** (ext4, label `persistence`, 6 GB by default — separate from your data/swap, nothing existing is touched) and writes `/ union` to it. Then it stops and tells you to reboot into persistence:
 
 ```sh
-sudo bash tools/persist-root.sh      # adds '/ union' to your persistence partition
-sudo reboot                          # then pick the "persistence" entry in the boot menu
-cd ~/lai && ./install.sh --serve --mcp
+# point LAI_DISK at a disk with free space; add LAI_DISK_YES=1 to skip the confirm
+LAI_DISK=sdc ./install.sh --serve --mcp
+# -> it makes the persistence partition, then:
+sudo reboot            # at the boot menu pick the entry that says "persistence"
+LAI_DISK=sdc ./install.sh --serve --mcp   # now / persists: driver installs and STAYS
 ```
 
-`persist-root.sh` finds the partition labelled `persistence` (or pass it: `sudo bash tools/persist-root.sh sdb3`), backs up the old `persistence.conf`, and writes `/ union` so everything under `/` — driver, apt packages, `/home` (and the auto-finish entry) — survives. Make sure that partition has a few GB spare, since the stick now fills as you install. The simplest alternative is installing Parrot to disk, where everything persists by default. `install.sh` installs + reboots **at most once**; if it still comes back on nouveau, persistence didn't take and it stays on CPU.
+Because live-boot finds the partition by its `persistence` **label**, it can sit in the free space of any disk. Sizes: `LAI_PERSIST_ROOT_SIZE` (default 6 GB — the driver + apt + `/home` are small; the model and lai's tools live elsewhere). With `/ union`, `/home` persists, so the big model is kept in RAM (`/dev/shm`) automatically unless you set `LAI_MODEL_DIR` to a data partition. Opt out of the whole thing with `LAI_SKIP_ROOT_PERSIST=1`; set it up by hand with `sudo bash tools/setup-persistence.sh sdc` (or `tools/persist-root.sh` to only edit an existing one).
+
+**The one step that can't be automated** is picking the "persistence" boot entry at the menu each boot — live-boot only honors `/ union` when you boot that entry. If it isn't your boot default you'll choose it after the driver's auto-reboot too. `install.sh` installs the driver + reboots **at most once per run**; if it still comes back on nouveau, you didn't boot the persistence entry (or persistence didn't take), and it stays on CPU. The only way to remove the boot-menu step entirely is a full install of Parrot to the stick rather than a live image.
 
 **4 GB cards (e.g. GTX 1650):** a 7–9B model doesn't fully fit in 4 GB VRAM, so lai offloads only as many layers as fit. `install.sh` sizes this for you — it reads your VRAM (`nvidia-smi`) and the model's layer count and writes a fitting `gpu_layers` into `config.json` (the KV cache stays in RAM so the weights get the VRAM). The estimate errs low; raise `gpu_layers` by hand until VRAM is nearly full (watch `nvidia-smi`) for a bit more speed. Prompt processing benefits the most; token generation is a smaller gain than a card that holds the whole model.
 
@@ -249,7 +262,7 @@ lai mcp import ~/lai/mcp-tools/mcp-servers.json
 
 Install one server at a time to see its errors: `TOOLS_DIR=~/lai/mcp-tools bash tools/setup-mcp.sh --only captcha-free`. List what's registered: `tools/setup-mcp.sh --list`.
 
-**Running on CPU despite having a GPU?** Two common causes. (1) The GPU is on the open-source **nouveau/NVK** driver, which crashes on this workload — `install.sh` installs the proprietary driver for you (see [GPU](#gpu-use-the-proprietary-nvidia-driver)); if it keeps coming back on nouveau, your live USB isn't persisting the root filesystem — turn on full root persistence with `sudo bash tools/persist-root.sh`, or install Parrot to disk. (2) The driver is fine but the GPU self-test fell back to CPU. Check what happened:
+**Running on CPU despite having a GPU?** Two common causes. (1) The GPU is on the open-source **nouveau/NVK** driver, which crashes on this workload — `install.sh` installs the proprietary driver for you (see [GPU](#gpu-use-the-proprietary-nvidia-driver)); if it keeps coming back on nouveau, your live USB isn't persisting the root filesystem — make sure you booted the "persistence" menu entry, set up root persistence with `LAI_DISK=sdc ./install.sh` (or `sudo bash tools/setup-persistence.sh sdc`), or install Parrot to disk. (2) The driver is fine but the GPU self-test fell back to CPU. Check what happened:
 
 ```sh
 cat ~/lai/.lai-engine-build; nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
