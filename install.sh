@@ -245,61 +245,6 @@ live_persistence_present() {
     && findmnt -rn /run/live/persistence >/dev/null 2>&1
 }
 
-# find_persistence_partition: echo the block device of the live-boot persistence
-# partition, trying LAI_PERSIST first (if it's a device), then the standard
-# 'persistence' label.
-find_persistence_partition() {
-  if [ -n "${LAI_PERSIST:-}" ] && [ -b "${LAI_PERSIST:-}" ]; then
-    echo "$LAI_PERSIST"; return 0
-  fi
-  local d
-  d="$(blkid -L persistence 2>/dev/null || true)"
-  [ -n "$d" ] && { echo "$d"; return 0; }
-  # also handle the case where LAI_PERSIST already resolved to /mnt/lai-persist/lai
-  if [ -n "${LAI_PERSIST_MOUNT:-}" ]; then
-    d="$(findmnt -nro SOURCE --mountpoint "$LAI_PERSIST_MOUNT" 2>/dev/null)"
-    [ -n "$d" ] && { echo "$d"; return 0; }
-  fi
-  return 1
-}
-
-# ensure_root_persistence: on a live USB with a persistence partition, make sure
-# its persistence.conf has '/ union' so the NVIDIA driver (and apt packages, and
-# /home) survive reboots. Idempotent and non-destructive: backs up the old conf,
-# and only runs when there's a persistence partition that isn't already set up
-# for root. On an installed Parrot this does nothing.
-#   LAI_SKIP_ROOT_PERSIST=1 opts out.
-ensure_root_persistence() {
-  [ "${LAI_SKIP_ROOT_PERSIST:-}" = 1 ] && return 0
-  grep -qw 'boot=live' /proc/cmdline 2>/dev/null || return 0        # not a live boot
-  root_persistent && return 0                                        # already good
-  local dev mp conf bak
-  dev="$(find_persistence_partition 2>/dev/null)" || {
-    warn "no persistence partition found (LAI_PERSIST=/dev/… or a 'persistence'-labelled partition). GPU driver won't persist on this live boot."
-    return 1
-  }
-  mp="$(mount_persist "$dev")" || { warn "couldn't mount $dev to enable root persistence"; return 1; }
-  conf="$mp/persistence.conf"
-  if [ -f "$conf" ] && grep -qE '^[[:space:]]*/[[:space:]]+union([[:space:]]|$)' "$conf"; then
-    say "root persistence already enabled on $dev (persistence.conf has '/ union')"
-    say "boot the 'persistence' entry in the boot menu for it to take effect"
-    return 0
-  fi
-  say "enabling full root persistence on $dev (so the GPU driver survives reboots)"
-  if [ -f "$conf" ]; then
-    bak="$conf.bak.$(date +%Y%m%d%H%M%S)"
-    $SUDO cp -a "$conf" "$bak" 2>/dev/null && say "backed up old persistence.conf -> $(basename "$bak")"
-  fi
-  if ! printf '/ union\n' | $SUDO tee "$conf" >/dev/null; then
-    warn "couldn't write $conf — enable root persistence by hand: sudo bash tools/persist-root.sh"
-    return 1
-  fi
-  sync
-  say "wrote '/ union' to $conf"
-  warn "the 'persistence' boot entry is what loads this. Make sure you pick it in the boot menu after reboot (or set it as default), or persistence won't take effect."
-  return 0
-}
-
 # ensure_gpu_driver: run BEFORE downloading anything. If the box has an NVIDIA
 # GPU on the open-source nouveau driver (which crashes this workload), install
 # the proprietary driver and reboot — so the model download and build happen on
@@ -600,15 +545,10 @@ main() {
   SUDO=""
   [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
-  # 0a. Root persistence — on a live USB, make sure the persistence partition
-  #     keeps the ROOT filesystem (so the driver, apt packages, /home survive).
-  #     No-op on an installed Parrot or when already set up.
-  ensure_root_persistence
-
-  # 0b. GPU driver gate — before any download. On an NVIDIA GPU stuck on nouveau,
-  #     this installs the proprietary driver and reboots; we only reach the model
-  #     download below once the right driver is active (or on CPU if there's no
-  #     GPU / it can't be fixed here).
+  # 0. GPU driver gate — before any download. On an NVIDIA GPU stuck on nouveau,
+  #    this installs the proprietary driver and reboots; we only reach the model
+  #    download below once the right driver is active (or on CPU if there's no
+  #    GPU / it can't be fixed here).
   ensure_gpu_driver "$@"
 
   # 1. model
