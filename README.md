@@ -9,13 +9,24 @@ Each weight exists once: the model file is memory-mapped and computed on in plac
 
 ## Install (Parrot OS / Debian) — one command
 
-One line clones lai, sorts out the GPU driver, downloads the model, builds the engine, sets up **all** the MCP servers, writes the config, and starts the phone page:
+One line clones lai, enables root persistence on your USB (if it's a live boot), installs the GPU driver, downloads the model, builds the engine, sets up **all** the MCP servers, writes the config, and starts the phone page:
 
 ```sh
+# installed to disk:
 git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && ./install.sh --serve --mcp
+
+# live USB (point LAI_PERSIST at your persistence partition, e.g. sdc3):
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
+  LAI_PERSIST=/dev/sdc3 ./install.sh --serve --mcp
 ```
 
-It does the **GPU driver first, before downloading anything.** On an NVIDIA card stuck on the open-source nouveau driver it installs the proprietary driver and reboots, then **finishes on its own after the reboot** (desktop auto-login) — run the one line and walk away. If the driver's already good, or there's no NVIDIA GPU, it goes straight to the model. (If the auto-finish can't run — e.g. a non-persistent live boot — just run the same line again after the reboot. See [GPU](#gpu-use-the-proprietary-nvidia-driver).)
+Order of operations (steps 0 and 0b run **before** anything is downloaded, so nothing is wasted):
+
+- **Live USB:** turns on **full root persistence** (`/ union`) on your persistence partition if it isn't already, so the driver survives reboots.
+- **GPU driver:** on an NVIDIA card stuck on nouveau it installs the proprietary driver and reboots, then **finishes on its own after the reboot** (desktop auto-login) — run the one line and walk away. If the driver's already good or there's no NVIDIA GPU, this is a no-op.
+- Then: model → engine → MCP → config → serve.
+
+**Live-USB note:** at the boot menu after the auto-reboot, pick the entry that says "persistence" — that's what loads `/ union`. See [GPU](#gpu-use-the-proprietary-nvidia-driver) for details.
 
 **Keys** are optional — servers that need one stay dormant until it's set. Put them right before the command:
 
@@ -84,15 +95,14 @@ Knobs:
 - `LAI_FORCE_REBOOT=1` — reboot even when the boot looks non-persistent (see caveat).
 - Driver only, by hand: `sudo bash tools/enable-gpu.sh` (add `--cuda` for a CUDA build instead of Vulkan — bigger, usually unneeded).
 
-**Live USB — turn on full root persistence first.** The driver installs into the root filesystem (`/`), and a live USB only keeps `/` across reboots with **full root persistence** (`/ union`). A `LAI_PERSIST` data partition keeps *lai's* files but **not** the driver, so without root persistence the GPU reverts to nouveau every boot. `install.sh` checks for this: if root isn't persistent it **won't reboot** (that would just loop) — it runs on CPU and tells you to fix persistence. One-time fix:
+**Live USB — handled for you.** The driver installs into `/`, and a live USB only keeps `/` across reboots with **full root persistence** (`/ union`). A `LAI_PERSIST` data partition keeps *lai's* files but **not** the driver — so without root persistence the GPU reverts to nouveau every boot. **`install.sh` now sets this up for you**: on step 0 it finds your persistence partition (from `LAI_PERSIST=/dev/…` or the standard `persistence` label), and if its `persistence.conf` doesn't already have `/ union` it backs the file up and writes it. Then step 0b installs the driver and reboots. So the single command does the lot:
 
 ```sh
-sudo bash tools/persist-root.sh      # adds '/ union' to your persistence partition
-sudo reboot                          # then pick the "persistence" entry in the boot menu
-cd ~/lai && ./install.sh --serve --mcp
+git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
+  LAI_PERSIST=/dev/sdc3 ./install.sh --serve --mcp
 ```
 
-`persist-root.sh` finds the partition labelled `persistence` (or pass it: `sudo bash tools/persist-root.sh sdb3`), backs up the old `persistence.conf`, and writes `/ union` so everything under `/` — driver, apt packages, `/home` (and the auto-finish entry) — survives. Make sure that partition has a few GB spare, since the stick now fills as you install. The simplest alternative is installing Parrot to disk, where everything persists by default. `install.sh` installs + reboots **at most once**; if it still comes back on nouveau, persistence didn't take and it stays on CPU.
+**At the boot menu after the reboot, pick the entry that says "persistence"** — that's what makes `/ union` take effect. (This is a live-USB limitation, not a lai one; if that entry isn't your boot default the driver won't be active.) On the "persistence" boot, the install auto-finishes on its own. Make sure the persistence partition has a few GB spare (the driver + build tools are a few hundred MB each). Opt out with `LAI_SKIP_ROOT_PERSIST=1`; by hand it's `sudo bash tools/persist-root.sh`. **The only truly one-shot path on removable media is installing Parrot to the stick** rather than running it live — then root persists by default, no boot-menu choice needed. `install.sh` installs + reboots **at most once**; if it still comes back on nouveau it stays on CPU.
 
 **4 GB cards (e.g. GTX 1650):** a 7–9B model doesn't fully fit in 4 GB VRAM, so lai offloads only as many layers as fit. `install.sh` sizes this for you — it reads your VRAM (`nvidia-smi`) and the model's layer count and writes a fitting `gpu_layers` into `config.json` (the KV cache stays in RAM so the weights get the VRAM). The estimate errs low; raise `gpu_layers` by hand until VRAM is nearly full (watch `nvidia-smi`) for a bit more speed. Prompt processing benefits the most; token generation is a smaller gain than a card that holds the whole model.
 
