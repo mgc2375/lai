@@ -25,6 +25,8 @@
 #
 # Optional storage: LAI_DISK=sdc carves lai-data + lai-swap from that disk's free
 # space; LAI_PERSIST=/path (a folder or block device) keeps lai's files there.
+# On a live boot the big MCP tool clones auto-install to a spare ext4 partition
+# instead of RAM; LAI_TOOLS_DIR pins the location, LAI_NO_AUTODISK=1 keeps RAM.
 #
 # Overrides: LAI_MODEL_URL (model to download), LAI_MODEL_DIR (where to keep it),
 # LAI_DIR (install folder), LAI_MCP (MCP config to import), LLAMA_TAG.
@@ -211,6 +213,52 @@ fit_gpu_layers() {
   fi
   [ "$n" -lt 0 ] && n=0
   echo "$n"
+}
+
+# ram_backed PATH: true if PATH sits on a RAM filesystem (tmpfs / live overlay),
+# so writing big things there uses memory instead of disk.
+ram_backed() {
+  local fs; fs="$(findmnt -no FSTYPE -T "$1" 2>/dev/null || true)"
+  case "$fs" in tmpfs|overlay|ramfs) return 0 ;; *) return 1 ;; esac
+}
+
+# find_data_partition: the biggest writable ext2/3/4 partition that isn't the
+# running root or the live medium and is >= 8 GB (room for the MCP tool clones).
+# Empty if there's none. (set -e safe: guards every pipe, always returns 0.)
+find_data_partition() {
+  command -v lsblk >/dev/null 2>&1 || return 0
+  local root_src medium name sz typ fstype dev best="" bestsz=0
+  root_src="$(findmnt -nro SOURCE / 2>/dev/null || true)"
+  medium="$(findmnt -nro SOURCE /run/live/medium 2>/dev/null | head -1 || true)"
+  while read -r name sz typ; do
+    [ "${typ:-}" = part ] || continue
+    dev="/dev/$name"
+    [ "$dev" = "$root_src" ] && continue
+    [ "$dev" = "$medium" ] && continue
+    case "${sz:-}" in ''|*[!0-9]*) continue ;; esac
+    [ "$sz" -ge $((8 * 1024 * 1024 * 1024)) ] || continue
+    fstype="$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)"
+    case "$fstype" in ext2|ext3|ext4) ;; *) continue ;; esac
+    if [ "$sz" -gt "$bestsz" ]; then best="$dev"; bestsz="$sz"; fi
+  done < <(lsblk -bnro NAME,SIZE,TYPE 2>/dev/null || true)
+  [ -n "$best" ] && echo "$best"
+  return 0
+}
+
+# mount_data_dir: mount a spare ext4 partition read-write (reusing an existing
+# mount) and echo its mountpoint, chowned to the current user. Empty if none.
+mount_data_dir() {
+  local part mp
+  part="$(find_data_partition || true)"
+  [ -n "$part" ] || return 0
+  mp="$(findmnt -nro TARGET --source "$part" 2>/dev/null | head -1)"
+  if [ -z "$mp" ]; then
+    mp=/mnt/lai-data
+    $SUDO mkdir -p "$mp" 2>/dev/null
+    $SUDO mount "$part" "$mp" 2>/dev/null || return 0
+  fi
+  $SUDO chown "$(id -u):$(id -g)" "$mp" 2>/dev/null || true
+  echo "$mp"
 }
 
 # build_engine WORK [cmake flags...]: configure and compile lai-engine,
@@ -526,6 +574,20 @@ main() {
 
   # 6b. with --mcp, clone and register the built-in pentest MCP servers
   local tools_dir="${LAI_TOOLS_DIR:-$dir/mcp-tools}"
+  # The MCP tool clones (node_modules, Python venvs, Go builds) are big; on a live
+  # boot the default dir is RAM (tmpfs), which eats memory. Auto-move just these to
+  # a spare ext4 partition when there is one — the model and lai binaries stay put.
+  # Pin a spot with LAI_TOOLS_DIR, or keep them in RAM with LAI_NO_AUTODISK=1.
+  if [ "$setup_mcp" = 1 ] && [ -z "${LAI_TOOLS_DIR:-}" ] && [ "${LAI_NO_AUTODISK:-}" != 1 ] \
+     && grep -qw 'boot=live' /proc/cmdline 2>/dev/null && ram_backed "$tools_dir"; then
+    local _ddir; _ddir="$(mount_data_dir || true)"
+    if [ -n "$_ddir" ]; then
+      tools_dir="$_ddir/mcp-tools"
+      say "MCP tools -> $tools_dir (on disk, so they don't fill RAM)"
+    else
+      warn "MCP tools will install to RAM ($tools_dir); no spare ext4 partition found. Set LAI_TOOLS_DIR=/mnt/<disk>/mcp-tools to keep them off memory."
+    fi
+  fi
   if [ "$setup_mcp" = 1 ]; then
     say "setting up MCP servers in $tools_dir (clones + builds; takes a while)"
     if TOOLS_DIR="$tools_dir" bash "$HERE/tools/setup-mcp.sh" ${LAI_MCP_ONLY:+--only "$LAI_MCP_ONLY"}; then
