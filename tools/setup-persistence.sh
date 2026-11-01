@@ -42,6 +42,43 @@ write_conf() {
   umount "$mp" 2>/dev/null || true; rmdir "$mp" 2>/dev/null || true
 }
 
+# use_existing_partition PART: turn an existing ext* partition (e.g. your 21 GB
+# /dev/sdc3) INTO the root-persistence volume — no carving, no GPT needed. It
+# relabels the filesystem to 'persistence' (so live-boot finds it) and writes
+# '/ union'. Non-destructive: the label change and the one config file don't
+# touch your data. Refuses the running root and the live-boot medium (the ISO).
+use_existing_partition() {
+  local p="$1" fstype cur_label root_src m ms
+  [ -b "$p" ] || die "no such partition: $p"
+  root_src="$(findmnt -nro SOURCE / 2>/dev/null || true)"
+  [ -n "$root_src" ] && [ "$p" = "$root_src" ] && die "$p is the running root filesystem — refusing"
+  for m in /run/live/medium /lib/live/mount/medium; do
+    ms="$(findmnt -nro SOURCE "$m" 2>/dev/null | head -1)"
+    [ -n "$ms" ] && [ "$ms" = "$p" ] && die "$p is the live-boot medium (the ISO) — refusing to touch it"
+  done
+  fstype="$(blkid -o value -s TYPE "$p" 2>/dev/null || true)"
+  case "$fstype" in
+    ext2|ext3|ext4) ;;
+    "") die "$p has no filesystem. Format it first: sudo mkfs.ext4 -L persistence $p" ;;
+    *) die "$p is $fstype, not ext4 — live-boot root persistence needs a Linux filesystem. Refusing to touch $p (make a separate ext4 partition instead)." ;;
+  esac
+  say "using existing partition $p ($fstype) as the root-persistence volume — your data on it is kept"
+  cur_label="$(blkid -o value -s LABEL "$p" 2>/dev/null || true)"
+  if [ "$cur_label" != persistence ]; then
+    if findmnt -nro TARGET --source "$p" >/dev/null 2>&1; then
+      umount "$p" 2>/dev/null || die "$p is mounted and busy; unmount it and re-run:  sudo umount $p"
+    fi
+    command -v e2label >/dev/null 2>&1 || { apt-get install -y -qq e2fsprogs >/dev/null 2>&1 || true; }
+    e2label "$p" persistence || die "couldn't set the 'persistence' label on $p"
+    say "relabelled $p -> 'persistence' (was '${cur_label:-none}')"
+  fi
+  write_conf "$p"
+  say "done: persistence volume = $p"
+  say "REBOOT and pick the 'persistence' boot entry, then rerun ./install.sh"
+  echo "LAI_PERSISTENCE_DEV=$p"
+  exit 0
+}
+
 # --- reuse an existing 'persistence' partition (by filesystem label) ---
 EX="$(blkid -L persistence 2>/dev/null || true)"
 if [ -n "$EX" ]; then
@@ -52,11 +89,15 @@ if [ -n "$EX" ]; then
   exit 0
 fi
 
-# --- otherwise carve one from free space ---
-[ -n "$dev" ] || die "no 'persistence' partition yet, and no disk given. Run: sudo bash tools/setup-persistence.sh <disk with free space, e.g. sdc> [size]"
+# --- a specific partition was given (e.g. sdc3): use it directly, don't carve ---
+[ -n "$dev" ] || die "no 'persistence' partition yet, and nothing given. Run: sudo bash tools/setup-persistence.sh <an existing ext4 partition, e.g. sdc3, OR a disk with free space, e.g. sdc> [size]"
 dev="/dev/${dev#/dev/}"
-[ -b "$dev" ] || die "no such disk: $dev"
-case "$dev" in *[0-9]) die "give the whole disk (e.g. sdc), not a partition" ;; esac
+[ -b "$dev" ] || die "no such device: $dev"
+if [ "$(lsblk -nro TYPE "$dev" 2>/dev/null | head -1)" = part ]; then
+  use_existing_partition "$dev"
+fi
+
+# --- otherwise it's a whole disk: carve one from its free space (needs GPT) ---
 
 # guards: never the running-system disk
 root_src="$(findmnt -nro SOURCE / 2>/dev/null || true)"
@@ -65,7 +106,7 @@ if [ -n "$root_src" ] && [ -b "$root_src" ]; then
   [ "$dev" = "$root_disk" ] && die "$dev holds the running system — refusing"
 fi
 [ "$(blkid -o value -s PTTYPE "$dev" 2>/dev/null)" = gpt ] || \
-  die "$dev is not GPT. Make an ext4 partition labelled 'persistence' with gparted and re-run (or use a GPT disk)."
+  die "$dev is MBR, not GPT, so I can't safely carve a new partition from it. Point me at an EXISTING ext4 partition on it instead (I'll relabel it 'persistence' and add '/ union', non-destructively) — e.g.:  sudo bash tools/setup-persistence.sh ${dev#/dev/}3  (pick your spare data partition with: lsblk -f $dev)."
 
 say "current layout of $dev:"; lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$dev" >&2; echo >&2
 free_gib="$(parted -s "$dev" unit GiB print free 2>/dev/null | awk '/Free Space/{gsub(/GiB/,"",$3); if($3+0>m)m=$3+0} END{print int(m)}')"

@@ -269,6 +269,29 @@ live_boot_disk() {
   [ -n "$disk" ] && [ -b "/dev/$disk" ] && echo "$disk"
 }
 
+# existing_persist_partition DISK: the biggest existing ext2/3/4 partition on
+# DISK that isn't the running root or the live medium (the ISO) — i.e. a spare
+# data partition like /dev/sdc3 we can turn into the persistence volume without
+# carving anything. Needs ~4 GB+. Empty if there's no suitable one.
+existing_persist_partition() {
+  local disk="$1" root_src medium best bestsz name fstype dev sz
+  [ -n "$disk" ] || return 0
+  command -v lsblk >/dev/null 2>&1 || return 0
+  root_src="$(findmnt -nro SOURCE / 2>/dev/null || true)"
+  medium="$(findmnt -nro SOURCE /run/live/medium 2>/dev/null | head -1)"
+  best=""; bestsz=0
+  while read -r name fstype; do
+    [ -n "$fstype" ] || continue
+    case "$fstype" in ext2|ext3|ext4) ;; *) continue ;; esac
+    dev="/dev/$name"
+    [ "$dev" = "$root_src" ] && continue
+    [ "$dev" = "$medium" ] && continue
+    sz="$(lsblk -bnro SIZE "$dev" 2>/dev/null | head -1)"; [ -n "$sz" ] || sz=0
+    if [ "$sz" -gt "$bestsz" ]; then best="$dev"; bestsz="$sz"; fi
+  done < <(lsblk -nro NAME,FSTYPE "/dev/${disk#/dev/}" 2>/dev/null)
+  [ -n "$best" ] && [ "$bestsz" -ge $((4 * 1024 * 1024 * 1024)) ] && echo "$best"
+}
+
 # seed_persist_resume DEV ARGS...: pre-seed an auto-continue onto the just-made
 # persistence partition DEV, so after the user picks the "persistence" boot entry
 # the install CONTINUES by itself (desktop auto-login) — no re-clone, no re-typing.
@@ -352,28 +375,38 @@ ensure_root_persistence() {
   grep -qw 'boot=live' /proc/cmdline 2>/dev/null || return 0       # installed to disk: nothing to do
   root_persistent && return 0                                       # / already persists
 
-  local disk="${LAI_DISK:-${LAI_PERSIST_DISK:-}}" have_pp out dev auto=0
+  # target is what we hand to setup-persistence.sh: an existing ext4 PARTITION
+  # (e.g. /dev/sdc3 — relabelled + '/ union', non-destructive) when there is one,
+  # else a whole DISK to carve from. The user can force either via LAI_DISK /
+  # LAI_PERSIST_DISK (a disk) or by pointing those at a partition.
+  local target="${LAI_DISK:-${LAI_PERSIST_DISK:-}}" have_pp out dev auto=0 bootdisk
   have_pp="$(blkid -L persistence 2>/dev/null || true)"
-  if [ -z "$have_pp" ] && [ -z "$disk" ]; then
-    # hands-off: no persistence partition and no disk given — find the live USB
-    # ourselves and carve one from its free space (no LAI_DISK, no prompt).
-    disk="$(live_boot_disk)"
-    if [ -z "$disk" ]; then
-      warn "to run on the GPU, lai needs the driver to survive reboots, which needs a dedicated 'persistence' partition — but I couldn't work out which disk this live USB booted from. Pass it yourself and I'll carve one from its free space:  LAI_DISK=sdX ./install.sh --serve --mcp  (find sdX with lsblk). Running on CPU for now."
+  if [ -z "$have_pp" ] && [ -z "$target" ]; then
+    bootdisk="$(live_boot_disk)"
+    if [ -z "$bootdisk" ]; then
+      warn "to run on the GPU, lai needs the driver to survive reboots, which needs root persistence — but I couldn't work out which disk this live USB is. Point me at a spare ext4 partition and I'll use it:  LAI_PERSIST_DISK=/dev/sdXN ./install.sh --serve --mcp  (list them with: lsblk -f). Running on CPU for now."
       LAI_GPU=cpu
       return 0
     fi
     auto=1
-    say "no 'persistence' partition yet — auto-using the live USB (/dev/$disk) and carving one from its FREE space (your ISO/boot and data partitions are verified untouched)"
+    # prefer an existing spare partition on the USB (e.g. your 21 GB sdc3) over
+    # carving — works on MBR sticks too, and it's what you asked for.
+    target="$(existing_persist_partition "$bootdisk")"
+    if [ -n "$target" ]; then
+      say "no 'persistence' partition yet — using the existing $target on the live USB as the root-persistence volume (relabelled 'persistence' + '/ union'; your data on it is kept)"
+    else
+      target="/dev/${bootdisk#/dev/}"
+      say "no 'persistence' partition yet and no spare ext4 partition found — carving one from the free space of $target"
+    fi
   fi
 
   local where="reusing the existing persistence partition"
-  [ -n "$disk" ] && where="free space of /dev/$disk"
+  [ -n "$target" ] && where="$target"
   say "setting up full root persistence so the GPU driver survives reboots ($where)"
-  # auto-detected => no confirm (the user asked for one hands-off command); an
-  # explicitly-passed disk still prompts unless LAI_DISK_YES=1.
-  if ! out="$($SUDO env LAI_DISK_YES="${LAI_DISK_YES:-$auto}" bash "$HERE/tools/setup-persistence.sh" ${disk:+"$disk"} "${LAI_PERSIST_ROOT_SIZE:-6G}")"; then
-    warn "couldn't set up root persistence (see above). Running on CPU; set it up by hand: sudo bash tools/setup-persistence.sh $disk"
+  # auto => no confirm (you asked for one hands-off command); an explicitly-given
+  # target still prompts (whole-disk carve only) unless LAI_DISK_YES=1.
+  if ! out="$($SUDO env LAI_DISK_YES="${LAI_DISK_YES:-$auto}" bash "$HERE/tools/setup-persistence.sh" ${target:+"$target"} "${LAI_PERSIST_ROOT_SIZE:-6G}")"; then
+    warn "couldn't set up root persistence (see above). Running on CPU; set it up by hand: sudo bash tools/setup-persistence.sh ${target:-sdXN}"
     LAI_GPU=cpu
     return 0
   fi

@@ -17,12 +17,13 @@ git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && ./install.sh -
 
 It does the **GPU driver first, before downloading anything.** On an NVIDIA card stuck on the open-source nouveau driver it installs the proprietary driver and reboots, then **finishes on its own after the reboot** (desktop auto-login) — run the one line and walk away. If the driver's already good, or there's no NVIDIA GPU, it goes straight to the model.
 
-**On a live USB** the driver (and `/`) can't survive a reboot without root persistence — so the **same one line** finds the USB you booted from, carves a dedicated `persistence` partition out of its **free space** automatically (step 0a; your ISO/boot and data partitions are verified untouched), and writes `/ union` to it. No `LAI_DISK`, no prompt. It then stops once and asks you to reboot into the **"persistence"** boot entry; after that the driver installs and stays, and the rest runs on its own.
+**On a live USB** the driver (and `/`) can't survive a reboot without root persistence — so the **same one line** finds the USB you booted from and sets it up automatically (step 0a). If there's already a spare ext4 partition on the stick (e.g. a 21 GB `sdc3`) it just **uses that** — relabels it `persistence` and adds `/ union`, non-destructively, your data kept — which works on MBR sticks too. Otherwise it carves a dedicated `persistence` partition from the disk's **free space**. Either way: no `LAI_DISK`, no prompt; your ISO/boot partitions are never touched. It then reboots into the **"persistence"** entry once, and finishes on its own.
 
-Only override the disk if auto-detect can't tell which one it is (or you want a specific one):
+Only override the target if auto-detect picks wrong — point it at the exact partition or disk you want:
 
 ```sh
-LAI_DISK=sdc ./install.sh --serve --mcp      # carve persistence from sdc's free space
+LAI_PERSIST_DISK=/dev/sdc3 ./install.sh --serve --mcp   # use THIS partition for persistence
+LAI_DISK=sdc ./install.sh --serve --mcp                 # or carve from sdc's free space
 ```
 
 The one unavoidable manual step on a live USB is picking the **"persistence"** entry in the boot menu after each reboot (live-boot only honors `/ union` when you boot that entry — it can't be automated without touching the ISO partition). See [GPU / live USB](#gpu-use-the-proprietary-nvidia-driver) for the full flow.
