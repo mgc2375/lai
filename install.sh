@@ -269,6 +269,77 @@ live_boot_disk() {
   [ -n "$disk" ] && [ -b "/dev/$disk" ] && echo "$disk"
 }
 
+# seed_persist_resume DEV ARGS...: pre-seed an auto-continue onto the just-made
+# persistence partition DEV, so after the user picks the "persistence" boot entry
+# the install CONTINUES by itself (desktop auto-login) — no re-clone, no re-typing.
+# The persistence partition's filesystem root IS the '/ union' overlay's write
+# layer, so a file written at <part>/home/<user>/x appears at /home/<user>/x once
+# persistence is active. We copy this repo there (it's in RAM otherwise, gone on
+# reboot) and drop an autostart entry that reruns ./install.sh. The driver-reboot
+# that follows is then handled by the normal arm_autoresume (/home persists by
+# then). Best-effort: returns 1 if it can't seed (caller falls back to "rerun").
+#   LAI_NO_AUTORESUME=1  skip (user reruns the command after the reboot instead)
+seed_persist_resume() {
+  local dev="$1"; shift
+  [ "${LAI_NO_AUTORESUME:-}" = 1 ] && return 1
+  [ -b "$dev" ] || return 1
+  local ru rh ruid rgid mp base dest ad resume home_rel v
+  ru="${SUDO_USER:-$(id -un)}"
+  rh="$(getent passwd "$ru" 2>/dev/null | cut -d: -f6)"; [ -n "$rh" ] || rh="/home/$ru"
+  ruid="$(id -u "$ru" 2>/dev/null || echo 1000)"
+  rgid="$(id -g "$ru" 2>/dev/null || echo 1000)"
+  base="$(basename "$HERE")"
+  home_rel="${rh#/}"                                  # e.g. home/live
+  mp="$(mktemp -d)"
+  $SUDO mount "$dev" "$mp" 2>/dev/null || { rmdir "$mp" 2>/dev/null || true; return 1; }
+
+  dest="$mp/$home_rel/$base"                          # the repo, persisted
+  ad="$mp/$home_rel/.config/autostart"
+  resume="$mp/$home_rel/.lai-persist-resume.sh"
+  $SUDO mkdir -p "$dest" "$ad" 2>/dev/null
+  # copy the whole repo onto the partition so it's there after the reboot
+  if ! $SUDO cp -a "$HERE/." "$dest/" 2>/dev/null; then
+    $SUDO umount "$mp" 2>/dev/null || true; rmdir "$mp" 2>/dev/null || true; return 1
+  fi
+
+  # resume script: paths below are the REAL runtime paths (/home/<user>/…), not $mp
+  {
+    echo '#!/usr/bin/env bash'
+    echo '# auto-generated: continues the lai install after the persistence reboot'
+    echo 'set -u'
+    for v in LAI_PERSIST LAI_PERSIST_SWAP LAI_DISK LAI_DISK_YES LAI_DATA_SIZE LAI_SWAP_SIZE \
+             LAI_MODEL_DIR LAI_MODEL_URL LAI_DIR LAI_MCP LAI_MCP_ONLY LAI_GPU SWAP_DEV \
+             SOFT_CAP_GB RAMP_START_GB IDLE_MIN SWAP_SIZE ZRAM_SIZE ZRAM NGROK_AUTHTOKEN \
+             NGROK_DOMAIN SHODAN_API_KEY VIRUSTOTAL_API_KEY CM_API_KEY GEMINI_API_KEY \
+             BLOODHOUND_DOMAIN BLOODHOUND_TOKEN_ID BLOODHOUND_TOKEN_KEY; do
+      [ -n "${!v:-}" ] && printf 'export %s=%q\n' "$v" "${!v}"
+    done
+    printf 'rm -f %q\n' "$rh/.config/autostart/lai-persist-resume.desktop"  # run once
+    printf 'cd %q || exit 0\n' "$rh/$base"
+    printf 'command -v notify-send >/dev/null 2>&1 && notify-send lai "Persistence active — continuing install (GPU driver next)…" || true\n'
+    printf './install.sh'
+    for v in "$@"; do printf ' %q' "$v"; done
+    printf ' >> %q 2>&1\n' "$rh/$base/.lai-resume.log"
+    printf 'rm -f %q\n' "$rh/.lai-persist-resume.sh"                        # self-delete
+  } | $SUDO tee "$resume" >/dev/null 2>&1 || { $SUDO umount "$mp" 2>/dev/null || true; rmdir "$mp" 2>/dev/null || true; return 1; }
+  $SUDO chmod 700 "$resume" 2>/dev/null || true
+
+  $SUDO tee "$ad/lai-persist-resume.desktop" >/dev/null 2>&1 <<EOF || { $SUDO umount "$mp" 2>/dev/null || true; rmdir "$mp" 2>/dev/null || true; return 1; }
+[Desktop Entry]
+Type=Application
+Name=Finish lai install (after persistence)
+Exec=$rh/.lai-persist-resume.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true
+EOF
+
+  $SUDO chown -R "$ruid:$rgid" "$mp/$home_rel" 2>/dev/null || true
+  $SUDO sync
+  $SUDO umount "$mp" 2>/dev/null || true
+  rmdir "$mp" 2>/dev/null || true
+  return 0
+}
+
 # ensure_root_persistence: run BEFORE the driver gate. On a live boot where /
 # doesn't persist, set up full root persistence so the GPU driver (and apt, and
 # /home) survive reboots — reusing a 'persistence'-labelled partition if present,
@@ -308,7 +379,27 @@ ensure_root_persistence() {
   fi
   dev="$(printf '%s\n' "$out" | sed -n 's/^LAI_PERSISTENCE_DEV=//p' | tail -1)"
 
-  cat >&2 <<EOF
+  local seeded=0 rh_log
+  rh_log="~/$(basename "$HERE")/.lai-resume.log"
+  if [ -n "$dev" ] && seed_persist_resume "$dev" "$@"; then
+    seeded=1
+  fi
+
+  if [ "$seeded" = 1 ]; then
+    cat >&2 <<EOF
+
+  ->  Root persistence is set up on $dev, and the install is primed to CONTINUE on
+      its own after the reboot. The only thing left to do:
+
+        1) sudo reboot
+        2) at the boot menu, pick the entry that says "persistence"
+
+      That's it — nothing to type. It auto-logs in and finishes (installs the GPU
+      driver, reboots once more — pick "persistence" again — then builds and starts
+      lai). Progress log: $rh_log
+EOF
+  else
+    cat >&2 <<EOF
 
   ->  Root persistence is set up${dev:+ on $dev}. It activates on the NEXT boot of the
       "persistence" entry. Finish with:
@@ -319,6 +410,7 @@ ensure_root_persistence() {
 
       From there the driver installs and STAYS, and the rest runs on its own.
 EOF
+  fi
   exit 0
 }
 

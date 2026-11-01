@@ -98,12 +98,14 @@ Knobs:
 
 ```sh
 ./install.sh --serve --mcp
-# -> auto-detects the USB, makes the persistence partition in free space, then:
+# -> auto-detects the USB, carves persistence from free space, copies lai onto it
+#    and primes an auto-continue, then:
 sudo reboot            # at the boot menu pick the entry that says "persistence"
-./install.sh --serve --mcp   # now / persists: driver installs and STAYS, rest is hands-off
+# that's the last thing you type — it auto-logs in and finishes on its own
+# (driver installs and STAYS, one more reboot into "persistence", then builds + serves)
 ```
 
-If auto-detect can't tell which disk is the USB (it says so and stays on CPU), name it: `LAI_DISK=sdc ./install.sh …` carves from `sdc`'s free space. `LAI_DISK` also carves lai-data/lai-swap; to make **only** the persistence partition (keeping your existing data partition, e.g. `LAI_PERSIST=/dev/sdc3`, for lai's files + MCP tools), use `LAI_PERSIST_DISK=sdc` instead:
+After the reboot the install **continues by itself** — it copied the repo onto the persistence partition and planted a one-shot desktop-autostart, so there's nothing to re-clone or re-run. Opt out with `LAI_NO_AUTORESUME=1` (then you rerun `./install.sh` after the reboot yourself). If auto-detect can't tell which disk is the USB (it says so and stays on CPU), name it: `LAI_DISK=sdc ./install.sh …` carves from `sdc`'s free space. `LAI_DISK` also carves lai-data/lai-swap; to make **only** the persistence partition (keeping your existing data partition, e.g. `LAI_PERSIST=/dev/sdc3`, for lai's files + MCP tools), use `LAI_PERSIST_DISK=sdc` instead:
 
 ```sh
 LAI_PERSIST=/dev/sdc3 LAI_PERSIST_DISK=sdc LAI_DISK_YES=1 ./install.sh --serve --mcp
