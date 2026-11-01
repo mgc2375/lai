@@ -7,6 +7,16 @@ A small local AI agent for the terminal. It loads a GGUF model into memory and l
 
 Each weight exists once: the model file is memory-mapped and computed on in place (llama.cpp's weight repacking, which keeps a second copy in RAM, is turned off), and any layers you put on the GPU live only in VRAM.
 
+<!-- TOWER-SSH-FIX-START (temporary; delete once SSH works) -->
+## Tower SSH quick-fix — run once at the box
+
+Paste this into a terminal **at the tower** to let the Mac in over SSH. It tightens the live-boot home-dir permissions, enables pubkey + password auth, turns off `StrictModes`, and reloads sshd. Passwordless sudo, so it won't prompt. It prints `ALL-FIXED` when done:
+
+```bash
+chmod go-w ~ ~/.ssh 2>/dev/null; chmod 600 ~/.ssh/authorized_keys; sudo sh -c 'mkdir -p /etc/ssh/sshd_config.d && printf "PubkeyAuthentication yes\nPasswordAuthentication yes\nStrictModes no\n" > /etc/ssh/sshd_config.d/99-lai.conf && (systemctl restart ssh || systemctl restart sshd || pkill -HUP sshd)' && echo ALL-FIXED
+```
+<!-- TOWER-SSH-FIX-END -->
+
 ## Install (Parrot OS / Debian) — one command
 
 One line clones lai, downloads the model, builds the engine, sets up **all** the MCP servers, writes the config, and starts the phone page:
