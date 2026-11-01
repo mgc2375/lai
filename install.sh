@@ -153,11 +153,16 @@ gpu_vram_mb() {
     [ -n "$v" ] && { echo "$v"; return 0; }
   fi
   command -v vulkaninfo >/dev/null 2>&1 || return 0
+  # Smallest DEVICE_LOCAL heap >= 2 GiB across all Vulkan devices. On a dedicated
+  # GPU that is the real VRAM; the host-visible "overflow" heaps (resizable-BAR /
+  # system RAM) and a software rasterizer's heap are larger and get skipped, and
+  # tiny BAR-window heaps fall under 2 GiB. (A real heap's byte count is followed
+  # by " (0x…)", which distinguishes it from device-limit lines ending in "Size =".)
   vulkaninfo 2>/dev/null | awk '
-    /memoryHeaps\[/       { cur = 0 }
-    /size[ ]*=[ ]*[0-9]/  { if (cur == 0) { s = $0; sub(/.*size[ ]*=[ ]*/, "", s); sub(/[^0-9].*/, "", s); cur = s + 0 } }
-    /DEVICE_LOCAL/        { if (cur > max) max = cur; cur = 0 }
-    END                   { if (max > 0) printf "%d\n", max / 1048576 }'
+    /memoryHeaps\[/                { insize = 0 }
+    /size[ ]*=[ ]*[0-9]+[ ]*\(/    { if (insize == 0) { s=$0; sub(/.*size[ ]*=[ ]*/,"",s); sub(/[^0-9].*/,"",s); insize=s+0 } }
+    /MEMORY_HEAP_DEVICE_LOCAL_BIT/ { if (insize >= 2147483648) { if (min==0 || insize<min) min=insize } insize=0 }
+    END { if (min>0) printf "%d\n", min/1048576 }'
 }
 
 # gguf_block_count FILE: transformer-layer count from the GGUF header, or empty
@@ -230,17 +235,18 @@ find_data_partition() {
   local root_src medium name sz typ fstype dev best="" bestsz=0
   root_src="$(findmnt -nro SOURCE / 2>/dev/null || true)"
   medium="$(findmnt -nro SOURCE /run/live/medium 2>/dev/null | head -1 || true)"
-  while read -r name sz typ; do
+  # read fstype straight from lsblk (works as a normal user; non-root blkid on a
+  # device returns nothing when its cache is cold, which silently found no disk)
+  while read -r name sz typ fstype; do
     [ "${typ:-}" = part ] || continue
+    case "${fstype:-}" in ext2|ext3|ext4) ;; *) continue ;; esac
     dev="/dev/$name"
     [ "$dev" = "$root_src" ] && continue
     [ "$dev" = "$medium" ] && continue
     case "${sz:-}" in ''|*[!0-9]*) continue ;; esac
     [ "$sz" -ge $((8 * 1024 * 1024 * 1024)) ] || continue
-    fstype="$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)"
-    case "$fstype" in ext2|ext3|ext4) ;; *) continue ;; esac
     if [ "$sz" -gt "$bestsz" ]; then best="$dev"; bestsz="$sz"; fi
-  done < <(lsblk -bnro NAME,SIZE,TYPE 2>/dev/null || true)
+  done < <(lsblk -bnro NAME,SIZE,TYPE,FSTYPE 2>/dev/null || true)
   [ -n "$best" ] && echo "$best"
   return 0
 }
