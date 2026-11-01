@@ -17,14 +17,15 @@ git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && ./install.sh -
 
 It does the **GPU driver first, before downloading anything.** On an NVIDIA card stuck on the open-source nouveau driver it installs the proprietary driver and reboots, then **finishes on its own after the reboot** (desktop auto-login) — run the one line and walk away. If the driver's already good, or there's no NVIDIA GPU, it goes straight to the model.
 
-**On a live USB** the driver (and `/`) can't survive a reboot without root persistence, so point `LAI_DISK` at a disk with free space and `install.sh` carves a `persistence` partition from it automatically (step 0a), before anything else:
+**On a live USB** the driver (and `/`) can't survive a reboot without root persistence — so the **same one line** finds the USB you booted from, carves a dedicated `persistence` partition out of its **free space** automatically (step 0a; your ISO/boot and data partitions are verified untouched), and writes `/ union` to it. No `LAI_DISK`, no prompt. It then stops once and asks you to reboot into the **"persistence"** boot entry; after that the driver installs and stays, and the rest runs on its own.
+
+Only override the disk if auto-detect can't tell which one it is (or you want a specific one):
 
 ```sh
-git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
-  LAI_DISK=sdc LAI_DISK_YES=1 ./install.sh --serve --mcp
+LAI_DISK=sdc ./install.sh --serve --mcp      # carve persistence from sdc's free space
 ```
 
-The one unavoidable manual step on a live USB is picking the **"persistence"** entry in the boot menu after each reboot — see [GPU / live USB](#gpu-use-the-proprietary-nvidia-driver) for the full flow.
+The one unavoidable manual step on a live USB is picking the **"persistence"** entry in the boot menu after each reboot (live-boot only honors `/ union` when you boot that entry — it can't be automated without touching the ISO partition). See [GPU / live USB](#gpu-use-the-proprietary-nvidia-driver) for the full flow.
 
 **Keys** are optional — servers that need one stay dormant until it's set. Put them right before the command:
 
@@ -93,17 +94,16 @@ Knobs:
 - `LAI_FORCE_REBOOT=1` — reboot even when the boot looks non-persistent (see caveat).
 - Driver only, by hand: `sudo bash tools/enable-gpu.sh` (add `--cuda` for a CUDA build instead of Vulkan — bigger, usually unneeded).
 
-**Live USB — root persistence is set up for you.** The driver installs into the root filesystem (`/`), and a live USB only keeps `/` across reboots with **full root persistence** (`/ union`). Your `LAI_PERSIST` *data* partition keeps lai's files but **not** `/`, so without root persistence the GPU reverts to nouveau every boot. On a live boot where `/` isn't persistent, `install.sh` **carves a dedicated `persistence` partition from the free space of `LAI_DISK`** (ext4, label `persistence`, 6 GB by default — separate from your data/swap, nothing existing is touched) and writes `/ union` to it. Then it stops and tells you to reboot into persistence:
+**Live USB — root persistence is set up for you, no flags.** The driver installs into the root filesystem (`/`), and a live USB only keeps `/` across reboots with **full root persistence** (`/ union`). Your `LAI_PERSIST` *data* partition keeps lai's files but **not** `/`, so without root persistence the GPU reverts to nouveau every boot. On a live boot where `/` isn't persistent, the bare `install.sh` **finds the USB you booted from, carves a dedicated `persistence` partition out of its free space automatically** (ext4, label `persistence`, 6 GB by default — separate from your data/swap; every existing partition, including the ISO/boot `sdc1`/`sdc2`, is verified byte-for-byte untouched and the whole partition table is backed up first) and writes `/ union` to it. Then it stops once and tells you to reboot into persistence:
 
 ```sh
-# point LAI_DISK at a disk with free space; add LAI_DISK_YES=1 to skip the confirm
-LAI_DISK=sdc ./install.sh --serve --mcp
-# -> it makes the persistence partition, then:
+./install.sh --serve --mcp
+# -> auto-detects the USB, makes the persistence partition in free space, then:
 sudo reboot            # at the boot menu pick the entry that says "persistence"
-LAI_DISK=sdc ./install.sh --serve --mcp   # now / persists: driver installs and STAYS
+./install.sh --serve --mcp   # now / persists: driver installs and STAYS, rest is hands-off
 ```
 
-`LAI_DISK` also carves lai-data/lai-swap; to make **only** the persistence partition (keeping your existing data partition, e.g. `LAI_PERSIST=/dev/sdc3`, for lai's files + MCP tools), use `LAI_PERSIST_DISK=sdc` instead:
+If auto-detect can't tell which disk is the USB (it says so and stays on CPU), name it: `LAI_DISK=sdc ./install.sh …` carves from `sdc`'s free space. `LAI_DISK` also carves lai-data/lai-swap; to make **only** the persistence partition (keeping your existing data partition, e.g. `LAI_PERSIST=/dev/sdc3`, for lai's files + MCP tools), use `LAI_PERSIST_DISK=sdc` instead:
 
 ```sh
 LAI_PERSIST=/dev/sdc3 LAI_PERSIST_DISK=sdc LAI_DISK_YES=1 ./install.sh --serve --mcp

@@ -245,6 +245,30 @@ live_persistence_present() {
     && findmnt -rn /run/live/persistence >/dev/null 2>&1
 }
 
+# live_boot_disk: the whole-disk kernel name (e.g. sdc) the live system booted
+# from — the USB stick that holds the ISO and (usually) the leftover free space.
+# Found via the live medium mount; empty if it can't be worked out. Used to carve
+# the persistence partition automatically, so the bare one-command install needs
+# no LAI_DISK. (setup-persistence.sh only ever touches that disk's FREE space and
+# verifies every existing partition is untouched, so sdc1/sdc2 stay safe.)
+live_boot_disk() {
+  command -v lsblk >/dev/null 2>&1 || return 0
+  local src mp disk
+  if command -v findmnt >/dev/null 2>&1; then
+    for mp in /run/live/medium /lib/live/mount/medium /run/live/findfs; do
+      src="$(findmnt -nro SOURCE "$mp" 2>/dev/null | head -1)"
+      [ -n "$src" ] && break
+    done
+  fi
+  # last resort: the disk holding any 'persistence'/ISO-style mount under /run/live
+  [ -n "$src" ] || src="$(findmnt -nro SOURCE /run/live/* 2>/dev/null | grep -m1 '^/dev/')"
+  case "$src" in /dev/*) ;; *) return 0 ;; esac
+  disk="$(lsblk -nro PKNAME "$src" 2>/dev/null | head -1)"
+  [ -n "$disk" ] || disk="$(basename "$src" | sed -E 's/p?[0-9]+$//')"
+  # must be a whole disk with a block device
+  [ -n "$disk" ] && [ -b "/dev/$disk" ] && echo "$disk"
+}
+
 # ensure_root_persistence: run BEFORE the driver gate. On a live boot where /
 # doesn't persist, set up full root persistence so the GPU driver (and apt, and
 # /home) survive reboots — reusing a 'persistence'-labelled partition if present,
@@ -257,19 +281,28 @@ ensure_root_persistence() {
   grep -qw 'boot=live' /proc/cmdline 2>/dev/null || return 0       # installed to disk: nothing to do
   root_persistent && return 0                                       # / already persists
 
-  local disk="${LAI_DISK:-${LAI_PERSIST_DISK:-}}" have_pp out dev
+  local disk="${LAI_DISK:-${LAI_PERSIST_DISK:-}}" have_pp out dev auto=0
   have_pp="$(blkid -L persistence 2>/dev/null || true)"
   if [ -z "$have_pp" ] && [ -z "$disk" ]; then
-    warn "to make the GPU driver persist on this live USB, lai needs a dedicated 'persistence' partition. Point LAI_DISK at a disk with free space and I'll carve one from it, e.g.:  LAI_DISK=sdc ./install.sh --serve --mcp  (add LAI_DISK_YES=1 to skip the confirm). Running on CPU for now."
-    LAI_GPU=cpu
-    return 0
+    # hands-off: no persistence partition and no disk given — find the live USB
+    # ourselves and carve one from its free space (no LAI_DISK, no prompt).
+    disk="$(live_boot_disk)"
+    if [ -z "$disk" ]; then
+      warn "to run on the GPU, lai needs the driver to survive reboots, which needs a dedicated 'persistence' partition — but I couldn't work out which disk this live USB booted from. Pass it yourself and I'll carve one from its free space:  LAI_DISK=sdX ./install.sh --serve --mcp  (find sdX with lsblk). Running on CPU for now."
+      LAI_GPU=cpu
+      return 0
+    fi
+    auto=1
+    say "no 'persistence' partition yet — auto-using the live USB (/dev/$disk) and carving one from its FREE space (your ISO/boot and data partitions are verified untouched)"
   fi
 
   local where="reusing the existing persistence partition"
-  [ -n "$disk" ] && where="free space of $disk"
+  [ -n "$disk" ] && where="free space of /dev/$disk"
   say "setting up full root persistence so the GPU driver survives reboots ($where)"
-  if ! out="$($SUDO bash "$HERE/tools/setup-persistence.sh" ${disk:+"$disk"} "${LAI_PERSIST_ROOT_SIZE:-6G}")"; then
-    warn "couldn't set up root persistence (see above). Running on CPU; set it up by hand: sudo bash tools/setup-persistence.sh sdX"
+  # auto-detected => no confirm (the user asked for one hands-off command); an
+  # explicitly-passed disk still prompts unless LAI_DISK_YES=1.
+  if ! out="$($SUDO env LAI_DISK_YES="${LAI_DISK_YES:-$auto}" bash "$HERE/tools/setup-persistence.sh" ${disk:+"$disk"} "${LAI_PERSIST_ROOT_SIZE:-6G}")"; then
+    warn "couldn't set up root persistence (see above). Running on CPU; set it up by hand: sudo bash tools/setup-persistence.sh $disk"
     LAI_GPU=cpu
     return 0
   fi
