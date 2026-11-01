@@ -609,6 +609,18 @@ install_engine() {
   rm -rf "$work"
   say "fetching llama.cpp $LLAMA_TAG"
   git clone -q --depth 1 --branch "$LLAMA_TAG" https://github.com/ggml-org/llama.cpp "$work/llama.cpp"
+  # apply lai's local patches to llama.cpp (e.g. the NVK/nouveau stability
+  # workaround). A patch that doesn't apply to this LLAMA_TAG is skipped, not fatal.
+  if [ -d "$HERE/engine/patches" ]; then
+    for p in "$HERE"/engine/patches/*.patch; do
+      [ -f "$p" ] || continue
+      if git -C "$work/llama.cpp" apply "$p" 2>/dev/null; then
+        say "applied llama.cpp patch: $(basename "$p")"
+      else
+        warn "llama.cpp patch $(basename "$p") didn't apply to $LLAMA_TAG; skipping it"
+      fi
+    done
+  fi
   say "building lai-engine; this takes a few minutes"
   build_engine "$work" ${flags[@]+"${flags[@]}"} || return 1
   install -m 755 "$work/build/lai-engine" "$dir/lai-engine"

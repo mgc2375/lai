@@ -1,0 +1,27 @@
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index c094368..eb8d2f4 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -4781,6 +4781,22 @@ vk_device ggml_vk_get_device(size_t idx) {
+             device_extensions.push_back("VK_KHR_cooperative_matrix");
+         }
+ #endif
++
++        // lai NVK workaround: the open-source Mesa "NVK" driver (Vulkan on the
++        // nouveau kernel driver) advertises cooperative-matrix / fp16 / integer-dot
++        // support but implements them unreliably under llama.cpp's sustained matmul
++        // load, which surfaces as VK_ERROR_DEVICE_LOST mid-inference. Force the plain
++        // scalar fp32 code paths on NVK so it only uses what the open driver provides
++        // reliably. This is a stability fix only -- it does NOT raise clock speed
++        // (nouveau reclocking is kernel/firmware-side). Opt out with LAI_VK_TRUST_NVK=1.
++        if (device->driver_id == vk::DriverId::eMesaNvk && getenv("LAI_VK_TRUST_NVK") == nullptr) {
++            GGML_LOG_WARN("ggml_vulkan: NVK (open-source nouveau) detected - forcing conservative scalar paths (coopmat/fp16/int-dot off) for stability; set LAI_VK_TRUST_NVK=1 to override.\n");
++            device->coopmat_support     = false;
++            device->coopmat1_fa_support = false;
++            device->fp16                = false;
++            device->integer_dot_product = false;
++        }
++
+         device->name = GGML_VK_NAME + std::to_string(idx);
+ 
+         device_create_info
