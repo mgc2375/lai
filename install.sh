@@ -253,20 +253,22 @@ live_persistence_present() {
 # verifies every existing partition is untouched, so sdc1/sdc2 stay safe.)
 live_boot_disk() {
   command -v lsblk >/dev/null 2>&1 || return 0
-  local src mp disk
-  if command -v findmnt >/dev/null 2>&1; then
-    for mp in /run/live/medium /lib/live/mount/medium /run/live/findfs; do
-      src="$(findmnt -nro SOURCE "$mp" 2>/dev/null | head -1)"
-      [ -n "$src" ] && break
-    done
-  fi
-  # last resort: the disk holding any 'persistence'/ISO-style mount under /run/live
-  [ -n "$src" ] || src="$(findmnt -nro SOURCE /run/live/* 2>/dev/null | grep -m1 '^/dev/')"
+  command -v findmnt >/dev/null 2>&1 || return 0
+  local src="" mp disk=""
+  # NOTE: every pipeline/command-sub here ends in '|| true' and the function
+  # always 'return 0' — under the script's set -euo pipefail a bare non-zero here
+  # would abort install.sh silently (no output) from the caller's "$(...)".
+  for mp in /run/live/medium /lib/live/mount/medium /run/live/findfs; do
+    src="$(findmnt -nro SOURCE "$mp" 2>/dev/null | head -1 || true)"
+    [ -n "$src" ] && break
+  done
+  # last resort: the disk holding any mount under /run/live
+  [ -n "$src" ] || src="$(findmnt -nro SOURCE /run/live/* 2>/dev/null | grep -m1 '^/dev/' || true)"
   case "$src" in /dev/*) ;; *) return 0 ;; esac
-  disk="$(lsblk -nro PKNAME "$src" 2>/dev/null | head -1)"
-  [ -n "$disk" ] || disk="$(basename "$src" | sed -E 's/p?[0-9]+$//')"
-  # must be a whole disk with a block device
-  [ -n "$disk" ] && [ -b "/dev/$disk" ] && echo "$disk"
+  disk="$(lsblk -nro PKNAME "$src" 2>/dev/null | head -1 || true)"
+  [ -n "$disk" ] || disk="$(basename "$src" 2>/dev/null | sed -E 's/p?[0-9]+$//' || true)"
+  if [ -n "$disk" ] && [ -b "/dev/$disk" ]; then echo "$disk"; fi
+  return 0
 }
 
 # existing_persist_partition DISK: the biggest existing ext2/3/4 partition on
@@ -274,22 +276,27 @@ live_boot_disk() {
 # data partition like /dev/sdc3 we can turn into the persistence volume without
 # carving anything. Needs ~4 GB+. Empty if there's no suitable one.
 existing_persist_partition() {
-  local disk="$1" root_src medium best bestsz name fstype dev sz
+  local disk="$1" root_src="" medium="" best="" bestsz=0 name sz typ fstype dev
   [ -n "$disk" ] || return 0
   command -v lsblk >/dev/null 2>&1 || return 0
+  # (same set -e discipline as live_boot_disk: guard every pipe, always return 0)
   root_src="$(findmnt -nro SOURCE / 2>/dev/null || true)"
-  medium="$(findmnt -nro SOURCE /run/live/medium 2>/dev/null | head -1)"
-  best=""; bestsz=0
-  while read -r name fstype; do
-    [ -n "$fstype" ] || continue
-    case "$fstype" in ext2|ext3|ext4) ;; *) continue ;; esac
+  medium="$(findmnt -nro SOURCE /run/live/medium 2>/dev/null | head -1 || true)"
+  # list partitions with byte sizes; read fstype straight off each device with
+  # blkid (probes the superblock — reliable even when lsblk's column is blank)
+  while read -r name sz typ; do
+    [ "${typ:-}" = part ] || continue
     dev="/dev/$name"
     [ "$dev" = "$root_src" ] && continue
     [ "$dev" = "$medium" ] && continue
-    sz="$(lsblk -bnro SIZE "$dev" 2>/dev/null | head -1)"; [ -n "$sz" ] || sz=0
+    case "${sz:-}" in ''|*[!0-9]*) continue ;; esac
+    [ "$sz" -ge $((4 * 1024 * 1024 * 1024)) ] || continue       # >= 4 GB
+    fstype="$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)"
+    case "$fstype" in ext2|ext3|ext4) ;; *) continue ;; esac
     if [ "$sz" -gt "$bestsz" ]; then best="$dev"; bestsz="$sz"; fi
-  done < <(lsblk -nro NAME,FSTYPE "/dev/${disk#/dev/}" 2>/dev/null)
-  [ -n "$best" ] && [ "$bestsz" -ge $((4 * 1024 * 1024 * 1024)) ] && echo "$best"
+  done < <(lsblk -bnro NAME,SIZE,TYPE "/dev/${disk#/dev/}" 2>/dev/null || true)
+  [ -n "$best" ] && echo "$best"
+  return 0
 }
 
 # seed_persist_resume DEV ARGS...: pre-seed an auto-continue onto the just-made
@@ -382,7 +389,7 @@ ensure_root_persistence() {
   local target="${LAI_DISK:-${LAI_PERSIST_DISK:-}}" have_pp out dev auto=0 bootdisk
   have_pp="$(blkid -L persistence 2>/dev/null || true)"
   if [ -z "$have_pp" ] && [ -z "$target" ]; then
-    bootdisk="$(live_boot_disk)"
+    bootdisk="$(live_boot_disk || true)"
     if [ -z "$bootdisk" ]; then
       warn "to run on the GPU, lai needs the driver to survive reboots, which needs root persistence — but I couldn't work out which disk this live USB is. Point me at a spare ext4 partition and I'll use it:  LAI_PERSIST_DISK=/dev/sdXN ./install.sh --serve --mcp  (list them with: lsblk -f). Running on CPU for now."
       LAI_GPU=cpu
@@ -391,7 +398,7 @@ ensure_root_persistence() {
     auto=1
     # prefer an existing spare partition on the USB (e.g. your 21 GB sdc3) over
     # carving — works on MBR sticks too, and it's what you asked for.
-    target="$(existing_persist_partition "$bootdisk")"
+    target="$(existing_persist_partition "$bootdisk" || true)"
     if [ -n "$target" ]; then
       say "no 'persistence' partition yet — using the existing $target on the live USB as the root-persistence volume (relabelled 'persistence' + '/ union'; your data on it is kept)"
     else
