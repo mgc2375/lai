@@ -9,24 +9,13 @@ Each weight exists once: the model file is memory-mapped and computed on in plac
 
 ## Install (Parrot OS / Debian) — one command
 
-One line clones lai, sorts out the GPU driver, downloads the model, builds the engine, sets up **all** the MCP servers, writes the config, and starts the phone page:
+One line clones lai, downloads the model, builds the engine, sets up **all** the MCP servers, writes the config, and starts the phone page:
 
 ```sh
 git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && ./install.sh --serve --mcp
 ```
 
-It does the **GPU driver first, before downloading anything.** On an NVIDIA card stuck on the open-source nouveau driver it installs the proprietary driver and reboots, then **finishes on its own after the reboot** (desktop auto-login) — run the one line and walk away. If the driver's already good, or there's no NVIDIA GPU, it goes straight to the model.
-
-**On a live USB** the driver (and `/`) can't survive a reboot without root persistence — so the **same one line** finds the USB you booted from and sets it up automatically (step 0a). If there's already a spare ext4 partition on the stick (e.g. a 21 GB `sdc3`) it just **uses that** — relabels it `persistence` and adds `/ union`, non-destructively, your data kept — which works on MBR sticks too. Otherwise it carves a dedicated `persistence` partition from the disk's **free space**. Either way: no `LAI_DISK`, no prompt; your ISO/boot partitions are never touched. It then reboots into the **"persistence"** entry once, and finishes on its own.
-
-Only override the target if auto-detect picks wrong — point it at the exact partition or disk you want:
-
-```sh
-LAI_PERSIST_DISK=/dev/sdc3 ./install.sh --serve --mcp   # use THIS partition for persistence
-LAI_DISK=sdc ./install.sh --serve --mcp                 # or carve from sdc's free space
-```
-
-The one unavoidable manual step on a live USB is picking the **"persistence"** entry in the boot menu after each reboot (live-boot only honors `/ union` when you boot that entry — it can't be automated without touching the ISO partition). See [GPU / live USB](#gpu-use-the-proprietary-nvidia-driver) for the full flow.
+It **uses the GPU automatically** when there is one: a discrete GPU with a Vulkan driver gets a Vulkan build with as many layers offloaded as fit VRAM, otherwise it builds for CPU. This works on the **open-source Mesa NVK / nouveau** driver — no proprietary NVIDIA driver, no reboots, no persistence setup — because the engine is [patched](#gpu) onto NVK-safe code paths. It falls back to CPU if the GPU can't actually run the model. No root needed beyond the `sudo` the installer uses for `apt`.
 
 **Keys** are optional — servers that need one stay dormant until it's set. Put them right before the command:
 
@@ -39,9 +28,8 @@ git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && \
 
 **What it does,** skipping anything already done:
 
-0. **GPU driver — first, before any download.** NVIDIA GPU on nouveau → installs the proprietary driver and reboots, then auto-finishes after the reboot. Skipped if the driver's already good, there's no NVIDIA GPU, or `LAI_GPU=cpu`. See [GPU](#gpu-use-the-proprietary-nvidia-driver).
 1. **Model:** downloads [Huihui-Qwen3.5-9B-abliterated Q6_K](https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF) (7.4 GB, resumable). Use your own with `./install.sh /path/to/model.gguf`, or `--find` to search your drives.
-2. **Engine:** installs build tools and builds `lai-engine` against llama.cpp `b11982` — Vulkan if a working discrete GPU is found, else CPU (with a CPU fallback if a GPU build fails). GPU offload is sized to your VRAM.
+2. **Engine:** installs build tools and builds `lai-engine` against llama.cpp `b11982` — Vulkan if a discrete GPU with a Vulkan driver is found (open-source NVK/nouveau included, via the [patch](#gpu)), else CPU (with a CPU fallback if a GPU build fails, or if the GPU self-test can't run the model). GPU offload is sized to your VRAM.
 3. **Config:** writes `config.json` (context sized to your RAM, the model's sampling, auto-approve on). Reruns keep your settings and only refresh the model-specific ones when the model changes.
 4. **`--mcp`:** clones, builds and registers every pentest MCP server in the registry (see [below](#set-up-the-pentest-mcp-servers-automatically)) and starts their backends.
 5. **ngrok + `--serve`:** installs ngrok, saves the token, starts the tunnel and prints the phone login link. Comes with a test ngrok account; override with `NGROK_AUTHTOKEN=` / `NGROK_DOMAIN=`, or drop `--serve` to stay terminal-only.
@@ -54,9 +42,9 @@ Leave off `--mcp` for just the agent, or `--serve` for terminal-only.
 cd ~/lai && git pull && ./install.sh --serve --mcp
 ```
 
-### Live USB: keep it across reboots (persistence, storage, swap)
+### Live USB: keep lai's files across reboots (storage, swap)
 
-On a live boot nothing survives a reboot unless it's on a partition — **including the GPU driver**, which needs **full root persistence** (a `persistence`-labelled partition with `/ union`). `install.sh` sets that up automatically from `LAI_DISK`'s free space (step 0a; see the [GPU section](#gpu-use-the-proprietary-nvidia-driver)). A `LAI_PERSIST` data partition keeps lai's files but not the driver. To also carve lai's data + swap out of a disk's free space:
+On a live boot nothing survives a reboot unless it's on a partition. To keep lai's files, model cache and MCP tools across reboots, carve a data partition (and optional swap) from a disk's free space:
 
 ```sh
 LAI_DISK=sdc ./install.sh --serve --mcp --memguard --tools
@@ -67,56 +55,24 @@ LAI_DISK=sdc ./install.sh --serve --mcp --memguard --tools
 - **`--memguard`** fits a big model in limited RAM: compressed zram swap in front of disk swap, graded `vm.swappiness`, a cgroup `memory.high` cap, and an idle cache drop. Tune `SWAP_DEV`, `SOFT_CAP_GB`, `RAMP_START_GB`, `IDLE_MIN`, `SWAP_SIZE`, `ZRAM_SIZE`; stop it with `sudo pkill -f memguard.sh`. On an **NTFS** data disk (where swapfiles don't work) make a swap partition once: `sudo bash tools/make-swap.sh sdb 24G`.
 - **`--tools`** pre-installs ~30 common pentest tools Parrot doesn't ship and drops on-demand shims for the rest (installed on first use).
 
-Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP` (import an existing OpenCode/Claude config), `LAI_MCP_ONLY=hexstrike,kali,…`, `LAI_GPU=cpu|vulkan|cuda|rocm`, the persistence knobs `LAI_PERSIST_ROOT_SIZE` (default 6G), `LAI_SKIP_ROOT_PERSIST`, and the driver-gate knobs `LAI_NO_REBOOT`, `LAI_NO_AUTORESUME`, `LAI_SKIP_GPU_DRIVER`, `LAI_FORCE_REBOOT` (see [GPU](#gpu-use-the-proprietary-nvidia-driver)).
+Overrides: `LAI_MODEL_URL`, `LAI_MODEL_DIR`, `LAI_DIR`, `LAI_MCP` (import an existing OpenCode/Claude config), `LAI_MCP_ONLY=hexstrike,kali,…`, `LAI_GPU=cpu|vulkan|cuda|rocm`, `LLAMA_TAG`, and `LAI_VK_TRUST_NVK=1` (use the open driver's advertised feature set instead of the NVK-safe scalar paths — see [GPU](#gpu)).
 
 ### Parrot OS notes
 
 Built and tested against Parrot/Debian conventions: apt for packages, cgroup v2 (Parrot 6+) for the memory cap, and live-boot overlay/persistence. Every root/optional step degrades gracefully — if cgroup v2, a swap target, Docker or a GPU driver isn't there, that piece is skipped with a logged reason rather than failing the install. The memory guard needs root (the install uses `sudo`); check `memguard.log` to see the swap device and cap it chose.
 
-### GPU: use the proprietary NVIDIA driver
+### GPU
 
-An NVIDIA GPU on the open-source **nouveau/NVK** driver **loses the device under llama.cpp's compute and crashes the session**, so lai can't use it and falls back to CPU. The fix is the proprietary driver, and **`install.sh` handles it for you, before anything is downloaded:**
+lai builds the engine for **Vulkan** whenever there's a discrete GPU with a Vulkan driver, and offloads as many layers as fit VRAM. **No proprietary NVIDIA driver is required** — it runs on the **open-source Mesa NVK / nouveau** stack that ships with Parrot, with no driver install, no reboots and no persistence setup.
 
-1. The first thing `install.sh` does is check the driver. On an NVIDIA card on nouveau it installs the proprietary driver, pre-installs the build tools, and **reboots automatically** (10-second cancelable countdown) — before the 7.4 GB model download, so nothing is wasted.
-2. After the reboot it **finishes on its own**: a one-shot desktop-autostart entry reruns the install (the driver step is now a no-op → model, build, config, serve) and then deletes itself. You don't type anything. Progress logs to `~/lai/.lai-resume.log`.
+llama.cpp's Vulkan backend normally crashes on NVK (`VK_ERROR_DEVICE_LOST`): NVK advertises cooperative-matrix / fp16 / integer-dot support but handles them unreliably under sustained matmul. lai applies `engine/patches/0001-nvk-safe-vulkan.patch` to the llama.cpp checkout at build time — on an NVK device it forces the plain scalar fp32 code paths, so the engine only uses what the open driver provides reliably. The `gpu_works` self-test still runs before committing to the GPU and falls back to CPU if it can't generate a token.
 
-So on a fresh box it really is just the one line:
+- **Speed caveat:** nouveau can't reclock many NVIDIA cards (Turing and up need signed firmware it doesn't ship), so the GPU can be stuck at idle clocks — on such a card the Vulkan build may be *slower* than CPU. The patch is a stability fix, not a speed fix. If the self-test passes but it's slow, that's why; compare against `LAI_GPU=cpu`.
+- `LAI_VK_TRUST_NVK=1` — skip the patch's override and let the engine use NVK's advertised coopmat/fp16/int-dot (faster if your NVK is solid, but may bring back the crash).
+- `LAI_GPU=cpu` forces CPU; `LAI_GPU=vulkan` forces the Vulkan build; `LAI_GPU=cuda` builds the CUDA backend instead (needs the proprietary driver + CUDA toolkit, installed by you).
 
-```sh
-git clone https://github.com/mgc2375/lai.git ~/lai && cd ~/lai && ./install.sh --serve --mcp
-```
+**4 GB cards (e.g. GTX 1650):** a 7–9B model doesn't fully fit in 4 GB VRAM, so lai offloads only as many layers as fit. `install.sh` sizes this for you — it reads your VRAM (`nvidia-smi`, or the Vulkan device heap on the open driver) and the model's layer count and writes a fitting `gpu_layers` into `config.json` (the KV cache stays in RAM so the weights get the VRAM). The estimate errs low; raise `gpu_layers` by hand for a bit more speed until VRAM is nearly full.
 
-Knobs:
-
-- `LAI_NO_AUTORESUME=1` — install + reboot, but finish by rerunning the line yourself.
-- `LAI_NO_REBOOT=1` — install the driver but don't auto-reboot (reboot when you're ready; it still auto-finishes after).
-- `LAI_SKIP_GPU_DRIVER=1` — never touch the driver (you manage it yourself).
-- `LAI_GPU=cpu` — force CPU; skips the driver check entirely.
-- `LAI_FORCE_REBOOT=1` — reboot even when the boot looks non-persistent (see caveat).
-- Driver only, by hand: `sudo bash tools/enable-gpu.sh` (add `--cuda` for a CUDA build instead of Vulkan — bigger, usually unneeded).
-
-**Live USB — root persistence is set up for you, no flags.** The driver installs into the root filesystem (`/`), and a live USB only keeps `/` across reboots with **full root persistence** (`/ union`). Your `LAI_PERSIST` *data* partition keeps lai's files but **not** `/`, so without root persistence the GPU reverts to nouveau every boot. On a live boot where `/` isn't persistent, the bare `install.sh` **finds the USB you booted from, carves a dedicated `persistence` partition out of its free space automatically** (ext4, label `persistence`, 6 GB by default — separate from your data/swap; every existing partition, including the ISO/boot `sdc1`/`sdc2`, is verified byte-for-byte untouched and the whole partition table is backed up first) and writes `/ union` to it. Then it stops once and tells you to reboot into persistence:
-
-```sh
-./install.sh --serve --mcp
-# -> auto-detects the USB, carves persistence from free space, copies lai onto it
-#    and primes an auto-continue, then:
-sudo reboot            # at the boot menu pick the entry that says "persistence"
-# that's the last thing you type — it auto-logs in and finishes on its own
-# (driver installs and STAYS, one more reboot into "persistence", then builds + serves)
-```
-
-After the reboot the install **continues by itself** — it copied the repo onto the persistence partition and planted a one-shot desktop-autostart, so there's nothing to re-clone or re-run. Opt out with `LAI_NO_AUTORESUME=1` (then you rerun `./install.sh` after the reboot yourself). If auto-detect can't tell which disk is the USB (it says so and stays on CPU), name it: `LAI_DISK=sdc ./install.sh …` carves from `sdc`'s free space. `LAI_DISK` also carves lai-data/lai-swap; to make **only** the persistence partition (keeping your existing data partition, e.g. `LAI_PERSIST=/dev/sdc3`, for lai's files + MCP tools), use `LAI_PERSIST_DISK=sdc` instead:
-
-```sh
-LAI_PERSIST=/dev/sdc3 LAI_PERSIST_DISK=sdc LAI_DISK_YES=1 ./install.sh --serve --mcp
-```
-
-Because live-boot finds the partition by its `persistence` **label**, it can sit in the free space of any disk. Sizes: `LAI_PERSIST_ROOT_SIZE` (default 6 GB — the driver + apt + `/home` are small; the model and lai's tools live elsewhere). With `/ union`, `/home` persists, so the big model is kept in RAM (`/dev/shm`) automatically unless you set `LAI_MODEL_DIR` to a data partition. Opt out of the whole thing with `LAI_SKIP_ROOT_PERSIST=1`; set it up by hand with `sudo bash tools/setup-persistence.sh sdc` (or `tools/persist-root.sh` to only edit an existing one).
-
-**The one step that can't be automated** is picking the "persistence" boot entry at the menu each boot — live-boot only honors `/ union` when you boot that entry. If it isn't your boot default you'll choose it after the driver's auto-reboot too. `install.sh` installs the driver + reboots **at most once per run**; if it still comes back on nouveau, you didn't boot the persistence entry (or persistence didn't take), and it stays on CPU. The only way to remove the boot-menu step entirely is a full install of Parrot to the stick rather than a live image.
-
-**4 GB cards (e.g. GTX 1650):** a 7–9B model doesn't fully fit in 4 GB VRAM, so lai offloads only as many layers as fit. `install.sh` sizes this for you — it reads your VRAM (`nvidia-smi`) and the model's layer count and writes a fitting `gpu_layers` into `config.json` (the KV cache stays in RAM so the weights get the VRAM). The estimate errs low; raise `gpu_layers` by hand until VRAM is nearly full (watch `nvidia-smi`) for a bit more speed. Prompt processing benefits the most; token generation is a smaller gain than a card that holds the whole model.
 
 ## Use
 
@@ -271,19 +227,18 @@ lai mcp import ~/lai/mcp-tools/mcp-servers.json
 
 Install one server at a time to see its errors: `TOOLS_DIR=~/lai/mcp-tools bash tools/setup-mcp.sh --only captcha-free`. List what's registered: `tools/setup-mcp.sh --list`.
 
-**Running on CPU despite having a GPU?** Two common causes. (1) The GPU is on the open-source **nouveau/NVK** driver, which crashes on this workload — `install.sh` installs the proprietary driver for you (see [GPU](#gpu-use-the-proprietary-nvidia-driver)); if it keeps coming back on nouveau, your live USB isn't persisting the root filesystem — make sure you booted the "persistence" menu entry, set up root persistence with `LAI_DISK=sdc ./install.sh` (or `sudo bash tools/setup-persistence.sh sdc`), or install Parrot to disk. (2) The driver is fine but the GPU self-test fell back to CPU. Check what happened:
+**Running on CPU despite having a GPU?** The Vulkan build is only chosen when `vulkaninfo` reports a discrete GPU with a Vulkan driver. If you have a GPU but it built CPU, either the Vulkan stack isn't installed (`sudo apt install vulkan-tools mesa-vulkan-drivers`, then re-run), or the `gpu_works` self-test couldn't generate a token and fell back — on NVK/nouveau that can be a slow/unreclocked card as much as a crash (see [GPU](#gpu)). Check what happened:
 
 ```sh
-cat ~/lai/.lai-engine-build; nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+cat ~/lai/.lai-engine-build                                                    # built for vulkan/cuda or cpu?
+vulkaninfo --summary 2>/dev/null | grep -iE 'deviceName|driverName|deviceType'  # what Vulkan sees
 ```
 
 ```sh
 grep -iE 'gpu|vulkan|cuda|device|out of memory|error|ctx' ~/.local/share/lai/logs/engine.log | tail -20
 ```
 
-The first line shows whether the engine was built for `vulkan`/`cuda` or `cpu`, plus your VRAM and driver. `install.sh` sizes GPU offload to your VRAM automatically (`gpu_layers` in `config.json`) so a card smaller than the model still works — if that number is `0` or missing on a GPU build, your VRAM wasn't detected (`nvidia-smi` missing); set `gpu_layers` by hand. Force the backend with `LAI_GPU=vulkan ./install.sh` (or `cuda`).
-
-**Auto-finish after the driver reboot didn't run?** It's a best-effort desktop-autostart entry and needs `/home` to persist across the reboot. Just rerun the install line to finish; its log is `~/lai/.lai-resume.log`.
+The build stamp shows whether the engine is `vulkan`/`cuda` or `cpu`. `install.sh` sizes GPU offload to your VRAM automatically (`gpu_layers` in `config.json`) so a card smaller than the model still works — if that number is `0` or missing on a GPU build, your VRAM wasn't detected; set `gpu_layers` by hand. Force the backend with `LAI_GPU=vulkan ./install.sh`, or fall back with `LAI_GPU=cpu` if the GPU is the slower of the two.
 
 **Logs.** Engine: `~/.local/share/lai/logs/engine.log`. Each MCP server's stderr: `~/.local/share/lai/logs/mcp-<name>.log`.
 

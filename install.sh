@@ -7,35 +7,27 @@
 #   ./install.sh --serve           ...then start the phone page (lai serve)
 #   ./install.sh --mcp             ...also clone & set up the pentest MCP servers
 #                                  (hexstrike, kali, impacket, pentester, bloodhound)
-#   ./install.sh --memguard        ...also run the memory guard (swap + soft RAM cap).
-#                                  LAI_PERSIST_SWAP=11G puts the swapfile on the
-#                                  persistence partition (reserved once, reused each boot)
+#   ./install.sh --memguard        ...also run the memory guard (swap + soft RAM cap)
 #   ./install.sh --tools           ...install the CLI tools the MCP servers call
 #                                  (skips what Parrot has; shims the rest on-demand)
-#   LAI_DISK=sdc ./install.sh ...   carve lai-data (10G ext4) + lai-swap (11G) out of
-#                                  that disk's free space (detected+reused next boot)
 #
 #   NGROK_AUTHTOKEN=... NGROK_DOMAIN=name.ngrok-free.dev ./install.sh --serve
 #                                  use another ngrok account (defaults below;
 #                                  NGROK_AUTHTOKEN= NGROK_DOMAIN= skips ngrok)
 #
+# GPU: with a discrete GPU that has a Vulkan driver it builds for Vulkan and
+# offloads as many layers as fit VRAM. This works on the open-source Mesa NVK /
+# nouveau driver too — llama.cpp is patched (engine/patches) onto NVK-safe code
+# paths — so no proprietary NVIDIA driver is needed. Falls back to CPU if the GPU
+# can't run the model. Force a backend with LAI_GPU=cpu|vulkan|cuda|rocm.
+#
 # Re-running skips whatever is already done (download, build, config).
 #
-# Persistence (live boot): point LAI_PERSIST at a folder on a real drive
-# (e.g. your USB persistence partition) and the model, the built engine and
-# the config all live there, so after a reboot the same command finds
-# everything ready and just starts - no re-download, no rebuild:
+# Optional storage: LAI_DISK=sdc carves lai-data + lai-swap from that disk's free
+# space; LAI_PERSIST=/path (a folder or block device) keeps lai's files there.
 #
-#   LAI_PERSIST=/run/live/persistence/xxx/lai ./install.sh --serve
-#
-# MCP servers: install.sh imports an OpenCode or Claude Desktop config when it
-# finds one (LAI_MCP overrides the path). Keep that config - and anything the
-# servers need (tool clones, their backends) - on the persistent drive too, so
-# they survive a reboot; lai re-imports the config on every run.
-#
-# Overrides: LAI_MODEL_URL (model to download), LAI_MODEL_DIR (where to keep
-# it), LAI_DIR (install folder), LAI_MCP (MCP config to import),
-# LAI_GPU=cpu|vulkan|cuda|rocm, LLAMA_TAG.
+# Overrides: LAI_MODEL_URL (model to download), LAI_MODEL_DIR (where to keep it),
+# LAI_DIR (install folder), LAI_MCP (MCP config to import), LLAMA_TAG.
 set -euo pipefail
 
 # lai-engine uses llama.cpp's internal chat helpers, which change between
@@ -139,23 +131,31 @@ pick_gpu() {
   local vk
   vk="$(vulkaninfo --summary 2>/dev/null || true)"
   if printf '%s' "$vk" | grep -q 'PHYSICAL_DEVICE_TYPE_DISCRETE_GPU'; then
-    # nouveau's Vulkan driver (NVK) loses the device under heavy compute
-    if printf '%s' "$vk" | grep -qiE 'driverName *= *NVK|MESA_NVK|nouveau'; then
-      warn "your NVIDIA GPU is on the open-source nouveau/NVK driver, which crashes on this workload; building for CPU (install nvidia-driver to use the GPU)"
-      echo cpu
-      return
-    fi
+    # Build for Vulkan on any discrete GPU that has a Vulkan driver — including
+    # the open-source Mesa NVK / nouveau stack. llama.cpp is patched (see
+    # engine/patches) to use NVK-safe scalar paths, and the gpu_works test below
+    # falls back to CPU if the GPU still can't actually run the model.
     echo vulkan
   else
-    warn "found a GPU but no working Vulkan driver for it (NVIDIA: install nvidia-driver); building for CPU"
+    warn "found a GPU but no working Vulkan driver for it; building for CPU"
     echo cpu
   fi
 }
 
-# gpu_vram_mb: total VRAM (MB) of the first NVIDIA GPU, or empty if unknown
+# gpu_vram_mb: total VRAM (MB) of the GPU, or empty if unknown. Works on the
+# proprietary driver (nvidia-smi) and the open-source stack (NVK/radv) by reading
+# the largest DEVICE_LOCAL Vulkan memory heap.
 gpu_vram_mb() {
-  command -v nvidia-smi >/dev/null 2>&1 || return 0
-  nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc '0-9'
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local v; v="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc '0-9')"
+    [ -n "$v" ] && { echo "$v"; return 0; }
+  fi
+  command -v vulkaninfo >/dev/null 2>&1 || return 0
+  vulkaninfo 2>/dev/null | awk '
+    /memoryHeaps\[/       { cur = 0 }
+    /size[ ]*=[ ]*[0-9]/  { if (cur == 0) { s = $0; sub(/.*size[ ]*=[ ]*/, "", s); sub(/[^0-9].*/, "", s); cur = s + 0 } }
+    /DEVICE_LOCAL/        { if (cur > max) max = cur; cur = 0 }
+    END                   { if (max > 0) printf "%d\n", max / 1048576 }'
 }
 
 # gguf_block_count FILE: transformer-layer count from the GGUF header, or empty
@@ -211,365 +211,6 @@ fit_gpu_layers() {
   fi
   [ "$n" -lt 0 ] && n=0
   echo "$n"
-}
-
-# nvidia_active: the proprietary NVIDIA driver is loaded and the GPU responds
-# (nvidia-smi only works on the proprietary driver, not nouveau/NVK)
-nvidia_active() { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; }
-
-# root_persistent: do changes to / (where the GPU driver installs) survive a
-# reboot? True when installed to disk, or a live boot whose ROOT overlay's write
-# layer sits on a persistence volume (full '/ union' persistence) — NOT just any
-# persistence (a data-partition persistence doesn't keep the driver). Guards
-# against a futile driver-install + reboot that reverts to nouveau every time.
-root_persistent() {
-  if ! grep -qw 'boot=live' /proc/cmdline 2>/dev/null && [ ! -d /run/live ]; then
-    return 0                                   # not a live session -> installed to disk
-  fi
-  local line upper src
-  line="$(awk '$2=="/"{print; exit}' /proc/mounts 2>/dev/null)"
-  case "$line" in *overlay*) ;; *) return 1 ;; esac
-  upper="$(printf '%s\n' "$line" | tr ',' '\n' | sed -n 's/^upperdir=//p' | head -1)"
-  [ -n "$upper" ] || return 1
-  case "$upper" in /run/live/persistence/*) return 0 ;; esac
-  command -v findmnt >/dev/null 2>&1 || return 1
-  src="$(findmnt -no SOURCE -T "$upper" 2>/dev/null || true)"
-  case "$src" in /dev/*) return 0 ;; *) return 1 ;; esac      # on a disk, not tmpfs/RAM
-}
-
-# live_persistence_present: a live boot has persistence enabled (even if it only
-# covers data, not root) — used to pick the right fix message.
-live_persistence_present() {
-  grep -qw persistence /proc/cmdline 2>/dev/null && return 0
-  [ -d /run/live/persistence ] && command -v findmnt >/dev/null 2>&1 \
-    && findmnt -rn /run/live/persistence >/dev/null 2>&1
-}
-
-# live_boot_disk: the whole-disk kernel name (e.g. sdc) the live system booted
-# from — the USB stick that holds the ISO and (usually) the leftover free space.
-# Found via the live medium mount; empty if it can't be worked out. Used to carve
-# the persistence partition automatically, so the bare one-command install needs
-# no LAI_DISK. (setup-persistence.sh only ever touches that disk's FREE space and
-# verifies every existing partition is untouched, so sdc1/sdc2 stay safe.)
-live_boot_disk() {
-  command -v lsblk >/dev/null 2>&1 || return 0
-  command -v findmnt >/dev/null 2>&1 || return 0
-  local src="" mp disk=""
-  # NOTE: every pipeline/command-sub here ends in '|| true' and the function
-  # always 'return 0' — under the script's set -euo pipefail a bare non-zero here
-  # would abort install.sh silently (no output) from the caller's "$(...)".
-  for mp in /run/live/medium /lib/live/mount/medium /run/live/findfs; do
-    src="$(findmnt -nro SOURCE "$mp" 2>/dev/null | head -1 || true)"
-    [ -n "$src" ] && break
-  done
-  # last resort: the disk holding any mount under /run/live
-  [ -n "$src" ] || src="$(findmnt -nro SOURCE /run/live/* 2>/dev/null | grep -m1 '^/dev/' || true)"
-  case "$src" in /dev/*) ;; *) return 0 ;; esac
-  disk="$(lsblk -nro PKNAME "$src" 2>/dev/null | head -1 || true)"
-  [ -n "$disk" ] || disk="$(basename "$src" 2>/dev/null | sed -E 's/p?[0-9]+$//' || true)"
-  if [ -n "$disk" ] && [ -b "/dev/$disk" ]; then echo "$disk"; fi
-  return 0
-}
-
-# existing_persist_partition DISK: the biggest existing ext2/3/4 partition on
-# DISK that isn't the running root or the live medium (the ISO) — i.e. a spare
-# data partition like /dev/sdc3 we can turn into the persistence volume without
-# carving anything. Needs ~4 GB+. Empty if there's no suitable one.
-existing_persist_partition() {
-  local disk="$1" root_src="" medium="" best="" bestsz=0 name sz typ fstype dev
-  [ -n "$disk" ] || return 0
-  command -v lsblk >/dev/null 2>&1 || return 0
-  # (same set -e discipline as live_boot_disk: guard every pipe, always return 0)
-  root_src="$(findmnt -nro SOURCE / 2>/dev/null || true)"
-  medium="$(findmnt -nro SOURCE /run/live/medium 2>/dev/null | head -1 || true)"
-  # list partitions with byte sizes; read fstype straight off each device with
-  # blkid (probes the superblock — reliable even when lsblk's column is blank)
-  while read -r name sz typ; do
-    [ "${typ:-}" = part ] || continue
-    dev="/dev/$name"
-    [ "$dev" = "$root_src" ] && continue
-    [ "$dev" = "$medium" ] && continue
-    case "${sz:-}" in ''|*[!0-9]*) continue ;; esac
-    [ "$sz" -ge $((4 * 1024 * 1024 * 1024)) ] || continue       # >= 4 GB
-    fstype="$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)"
-    case "$fstype" in ext2|ext3|ext4) ;; *) continue ;; esac
-    if [ "$sz" -gt "$bestsz" ]; then best="$dev"; bestsz="$sz"; fi
-  done < <(lsblk -bnro NAME,SIZE,TYPE "/dev/${disk#/dev/}" 2>/dev/null || true)
-  [ -n "$best" ] && echo "$best"
-  return 0
-}
-
-# seed_persist_resume DEV ARGS...: pre-seed an auto-continue onto the just-made
-# persistence partition DEV, so after the user picks the "persistence" boot entry
-# the install CONTINUES by itself (desktop auto-login) — no re-clone, no re-typing.
-# The persistence partition's filesystem root IS the '/ union' overlay's write
-# layer, so a file written at <part>/home/<user>/x appears at /home/<user>/x once
-# persistence is active. We copy this repo there (it's in RAM otherwise, gone on
-# reboot) and drop an autostart entry that reruns ./install.sh. The driver-reboot
-# that follows is then handled by the normal arm_autoresume (/home persists by
-# then). Best-effort: returns 1 if it can't seed (caller falls back to "rerun").
-#   LAI_NO_AUTORESUME=1  skip (user reruns the command after the reboot instead)
-seed_persist_resume() {
-  local dev="$1"; shift
-  [ "${LAI_NO_AUTORESUME:-}" = 1 ] && return 1
-  [ -b "$dev" ] || return 1
-  local ru rh ruid rgid mp base dest ad resume home_rel v
-  ru="${SUDO_USER:-$(id -un)}"
-  rh="$(getent passwd "$ru" 2>/dev/null | cut -d: -f6)"; [ -n "$rh" ] || rh="/home/$ru"
-  ruid="$(id -u "$ru" 2>/dev/null || echo 1000)"
-  rgid="$(id -g "$ru" 2>/dev/null || echo 1000)"
-  base="$(basename "$HERE")"
-  home_rel="${rh#/}"                                  # e.g. home/live
-  mp="$(mktemp -d)"
-  $SUDO mount "$dev" "$mp" 2>/dev/null || { rmdir "$mp" 2>/dev/null || true; return 1; }
-
-  dest="$mp/$home_rel/$base"                          # the repo, persisted
-  ad="$mp/$home_rel/.config/autostart"
-  resume="$mp/$home_rel/.lai-persist-resume.sh"
-  $SUDO mkdir -p "$dest" "$ad" 2>/dev/null
-  # copy the whole repo onto the partition so it's there after the reboot
-  if ! $SUDO cp -a "$HERE/." "$dest/" 2>/dev/null; then
-    $SUDO umount "$mp" 2>/dev/null || true; rmdir "$mp" 2>/dev/null || true; return 1
-  fi
-
-  # resume script: paths below are the REAL runtime paths (/home/<user>/…), not $mp
-  {
-    echo '#!/usr/bin/env bash'
-    echo '# auto-generated: continues the lai install after the persistence reboot'
-    echo 'set -u'
-    for v in LAI_PERSIST LAI_PERSIST_SWAP LAI_DISK LAI_DISK_YES LAI_DATA_SIZE LAI_SWAP_SIZE \
-             LAI_MODEL_DIR LAI_MODEL_URL LAI_DIR LAI_MCP LAI_MCP_ONLY LAI_GPU SWAP_DEV \
-             SOFT_CAP_GB RAMP_START_GB IDLE_MIN SWAP_SIZE ZRAM_SIZE ZRAM NGROK_AUTHTOKEN \
-             NGROK_DOMAIN SHODAN_API_KEY VIRUSTOTAL_API_KEY CM_API_KEY GEMINI_API_KEY \
-             BLOODHOUND_DOMAIN BLOODHOUND_TOKEN_ID BLOODHOUND_TOKEN_KEY; do
-      [ -n "${!v:-}" ] && printf 'export %s=%q\n' "$v" "${!v}"
-    done
-    printf 'rm -f %q\n' "$rh/.config/autostart/lai-persist-resume.desktop"  # run once
-    printf 'cd %q || exit 0\n' "$rh/$base"
-    printf 'command -v notify-send >/dev/null 2>&1 && notify-send lai "Persistence active — continuing install (GPU driver next)…" || true\n'
-    printf './install.sh'
-    for v in "$@"; do printf ' %q' "$v"; done
-    printf ' >> %q 2>&1\n' "$rh/$base/.lai-resume.log"
-    printf 'rm -f %q\n' "$rh/.lai-persist-resume.sh"                        # self-delete
-  } | $SUDO tee "$resume" >/dev/null 2>&1 || { $SUDO umount "$mp" 2>/dev/null || true; rmdir "$mp" 2>/dev/null || true; return 1; }
-  $SUDO chmod 700 "$resume" 2>/dev/null || true
-
-  $SUDO tee "$ad/lai-persist-resume.desktop" >/dev/null 2>&1 <<EOF || { $SUDO umount "$mp" 2>/dev/null || true; rmdir "$mp" 2>/dev/null || true; return 1; }
-[Desktop Entry]
-Type=Application
-Name=Finish lai install (after persistence)
-Exec=$rh/.lai-persist-resume.sh
-Terminal=false
-X-GNOME-Autostart-enabled=true
-EOF
-
-  $SUDO chown -R "$ruid:$rgid" "$mp/$home_rel" 2>/dev/null || true
-  $SUDO sync
-  $SUDO umount "$mp" 2>/dev/null || true
-  rmdir "$mp" 2>/dev/null || true
-  return 0
-}
-
-# ensure_root_persistence: run BEFORE the driver gate. On a live boot where /
-# doesn't persist, set up full root persistence so the GPU driver (and apt, and
-# /home) survive reboots — reusing a 'persistence'-labelled partition if present,
-# else carving a DEDICATED one from the free space of $LAI_DISK via
-# tools/setup-persistence.sh. It then stops and asks for a reboot into the
-# persistence entry, since nothing should install onto a non-persistent /.
-# Never touches the LAI_PERSIST data partition. Skip with LAI_SKIP_ROOT_PERSIST=1.
-ensure_root_persistence() {
-  [ "${LAI_SKIP_ROOT_PERSIST:-}" = 1 ] && return 0
-  grep -qw 'boot=live' /proc/cmdline 2>/dev/null || return 0       # installed to disk: nothing to do
-  root_persistent && return 0                                       # / already persists
-
-  # target is what we hand to setup-persistence.sh: an existing ext4 PARTITION
-  # (e.g. /dev/sdc3 — relabelled + '/ union', non-destructive) when there is one,
-  # else a whole DISK to carve from. The user can force either via LAI_DISK /
-  # LAI_PERSIST_DISK (a disk) or by pointing those at a partition.
-  local target="${LAI_DISK:-${LAI_PERSIST_DISK:-}}" have_pp out dev auto=0 bootdisk
-  have_pp="$(blkid -L persistence 2>/dev/null || true)"
-  if [ -z "$have_pp" ] && [ -z "$target" ]; then
-    bootdisk="$(live_boot_disk || true)"
-    if [ -z "$bootdisk" ]; then
-      warn "to run on the GPU, lai needs the driver to survive reboots, which needs root persistence — but I couldn't work out which disk this live USB is. Point me at a spare ext4 partition and I'll use it:  LAI_PERSIST_DISK=/dev/sdXN ./install.sh --serve --mcp  (list them with: lsblk -f). Running on CPU for now."
-      LAI_GPU=cpu
-      return 0
-    fi
-    auto=1
-    # prefer an existing spare partition on the USB (e.g. your 21 GB sdc3) over
-    # carving — works on MBR sticks too, and it's what you asked for.
-    target="$(existing_persist_partition "$bootdisk" || true)"
-    if [ -n "$target" ]; then
-      say "no 'persistence' partition yet — using the existing $target on the live USB as the root-persistence volume (relabelled 'persistence' + '/ union'; your data on it is kept)"
-    else
-      target="/dev/${bootdisk#/dev/}"
-      say "no 'persistence' partition yet and no spare ext4 partition found — carving one from the free space of $target"
-    fi
-  fi
-
-  local where="reusing the existing persistence partition"
-  [ -n "$target" ] && where="$target"
-  say "setting up full root persistence so the GPU driver survives reboots ($where)"
-  # auto => no confirm (you asked for one hands-off command); an explicitly-given
-  # target still prompts (whole-disk carve only) unless LAI_DISK_YES=1.
-  if ! out="$($SUDO env LAI_DISK_YES="${LAI_DISK_YES:-$auto}" bash "$HERE/tools/setup-persistence.sh" ${target:+"$target"} "${LAI_PERSIST_ROOT_SIZE:-6G}")"; then
-    warn "couldn't set up root persistence (see above). Running on CPU; set it up by hand: sudo bash tools/setup-persistence.sh ${target:-sdXN}"
-    LAI_GPU=cpu
-    return 0
-  fi
-  dev="$(printf '%s\n' "$out" | sed -n 's/^LAI_PERSISTENCE_DEV=//p' | tail -1)"
-
-  local seeded=0 rh_log
-  rh_log="~/$(basename "$HERE")/.lai-resume.log"
-  if [ -n "$dev" ] && seed_persist_resume "$dev" "$@"; then
-    seeded=1
-  fi
-
-  if [ "$seeded" = 1 ]; then
-    cat >&2 <<EOF
-
-  ->  Root persistence is set up on $dev, and the install is primed to CONTINUE on
-      its own after the reboot. The only thing left to do:
-
-        1) sudo reboot
-        2) at the boot menu, pick the entry that says "persistence"
-
-      That's it — nothing to type. It auto-logs in and finishes (installs the GPU
-      driver, reboots once more — pick "persistence" again — then builds and starts
-      lai). Progress log: $rh_log
-EOF
-  else
-    cat >&2 <<EOF
-
-  ->  Root persistence is set up${dev:+ on $dev}. It activates on the NEXT boot of the
-      "persistence" entry. Finish with:
-
-        1) sudo reboot
-        2) in the boot menu choose the entry that says "persistence"
-        3) cd $HERE && ./install.sh $*
-
-      From there the driver installs and STAYS, and the rest runs on its own.
-EOF
-  fi
-  exit 0
-}
-
-# ensure_gpu_driver: run BEFORE downloading anything. If the box has an NVIDIA
-# GPU on the open-source nouveau driver (which crashes this workload), install
-# the proprietary driver and reboot — so the model download and build happen on
-# the right driver, not twice. Returns (continuing on CPU, no reboot) when there
-# is no NVIDIA GPU, CPU was requested, or a live boot can't keep the driver.
-#   LAI_GPU=cpu / LAI_SKIP_GPU_DRIVER=1  skip the whole check
-#   LAI_NO_REBOOT=1                      install the driver but don't auto-reboot
-#   LAI_NO_AUTORESUME=1                  don't auto-finish after the reboot
-#   LAI_FORCE_REBOOT=1                   reboot even on a non-persistent live boot
-
-# arm_autoresume ARGS...: after the driver reboot, finish the install on its own
-# via a desktop-autostart entry (Parrot live auto-logs in). The entry reruns the
-# same install, then deletes itself. Best-effort: if it can't be set up (no
-# writable autostart dir, non-persistent /home), the user just reruns the line.
-arm_autoresume() {
-  [ "${LAI_NO_AUTORESUME:-}" = 1 ] && return 1
-  local ru rh ad resume v
-  ru="${SUDO_USER:-$(id -un)}"
-  rh="$(getent passwd "$ru" 2>/dev/null | cut -d: -f6)"; [ -n "$rh" ] || rh="$HOME"
-  ad="$rh/.config/autostart"
-  resume="$HERE/.lai-resume.sh"
-  {
-    echo '#!/usr/bin/env bash'
-    echo '# auto-generated: finishes the lai install after the GPU-driver reboot'
-    echo 'set -u'
-    for v in LAI_PERSIST LAI_PERSIST_SWAP LAI_DISK LAI_DISK_YES LAI_DATA_SIZE LAI_SWAP_SIZE \
-             LAI_MODEL_DIR LAI_MODEL_URL LAI_DIR LAI_MCP LAI_MCP_ONLY LAI_GPU SWAP_DEV \
-             SOFT_CAP_GB RAMP_START_GB IDLE_MIN SWAP_SIZE ZRAM_SIZE ZRAM NGROK_AUTHTOKEN \
-             NGROK_DOMAIN SHODAN_API_KEY VIRUSTOTAL_API_KEY CM_API_KEY GEMINI_API_KEY \
-             BLOODHOUND_DOMAIN BLOODHOUND_TOKEN_ID BLOODHOUND_TOKEN_KEY; do
-      [ -n "${!v:-}" ] && printf 'export %s=%q\n' "$v" "${!v}"
-    done
-    printf 'rm -f %q\n' "$ad/lai-resume.desktop"           # don't run again
-    printf 'cd %q || exit 0\n' "$HERE"
-    printf 'command -v notify-send >/dev/null 2>&1 && notify-send lai "Finishing install (model + build)…" || true\n'
-    printf 'LAI_SKIP_GPU_DRIVER=1 ./install.sh'
-    for v in "$@"; do printf ' %q' "$v"; done
-    printf ' >> %q 2>&1\n' "$HERE/.lai-resume.log"
-    printf 'command -v notify-send >/dev/null 2>&1 && notify-send lai "Install finished." || true\n'
-    printf 'rm -f %q\n' "$resume"                           # self-delete (it holds the env/keys)
-  } > "$resume" 2>/dev/null || { warn "couldn't write the resume script; after the reboot rerun the install command to finish"; return 1; }
-  chmod 700 "$resume" 2>/dev/null || true
-  mkdir -p "$ad" 2>/dev/null || true
-  cat > "$ad/lai-resume.desktop" 2>/dev/null <<EOF || { warn "couldn't arm auto-resume (no writable autostart dir); after the reboot rerun the install command to finish"; return 1; }
-[Desktop Entry]
-Type=Application
-Name=Finish lai install
-Exec=$resume
-Terminal=false
-X-GNOME-Autostart-enabled=true
-EOF
-  return 0
-}
-
-ensure_gpu_driver() {
-  [ "${LAI_GPU:-}" = cpu ] && return 0
-  [ "${LAI_SKIP_GPU_DRIVER:-}" = 1 ] && return 0
-  command -v lspci >/dev/null 2>&1 || return 0
-  lspci 2>/dev/null | grep -iE 'vga|3d|display' | grep -qi nvidia || return 0
-
-  local marker="$HERE/.lai-driver-attempted"
-  if nvidia_active; then
-    say "proprietary NVIDIA driver active"
-    rm -f "$marker" 2>/dev/null || true
-    return 0
-  fi
-
-  warn "your NVIDIA GPU is on the open-source nouveau/NVK driver, which crashes under llama.cpp compute"
-  if [ -f "$marker" ]; then
-    warn "the driver was installed and the box rebooted once, but it's still on nouveau — this live boot isn't keeping the driver across reboots. Continuing on CPU. Install Parrot to disk (or enable root persistence) to use the GPU; set LAI_SKIP_GPU_DRIVER=1 to silence this."
-    LAI_GPU=cpu
-    return 0
-  fi
-  if ! root_persistent && [ "${LAI_FORCE_REBOOT:-}" != 1 ]; then
-    if live_persistence_present; then
-      warn "your live USB has persistence, but it doesn't cover the ROOT filesystem — so the GPU driver (installed into /) wouldn't survive a reboot. Turn on full root persistence first:  sudo bash tools/persist-root.sh  (then reboot into the persistence boot entry and rerun). Running on CPU for now; LAI_FORCE_REBOOT=1 overrides."
-    else
-      warn "this looks like a non-persistent live boot, so a driver install wouldn't survive the reboot. Turn on full root persistence:  sudo bash tools/persist-root.sh  (and boot the persistence menu entry). Running on CPU for now; LAI_FORCE_REBOOT=1 overrides."
-    fi
-    LAI_GPU=cpu
-    return 0
-  fi
-
-  say "installing the proprietary NVIDIA driver first — before downloading the model, so nothing is wasted across the reboot"
-  if ! bash "$HERE/tools/enable-gpu.sh" --from-install; then
-    warn "driver install failed; continuing on CPU (see the apt output above). Retry by hand with: sudo bash tools/enable-gpu.sh"
-    LAI_GPU=cpu
-    return 0
-  fi
-  : > "$marker" 2>/dev/null || true
-
-  # pre-install the build toolchain now, while we have sudo, so the post-reboot
-  # finish needs no password
-  say "pre-installing build tools so the finish-after-reboot is hands-off"
-  $SUDO apt-get install -y -qq build-essential cmake git libvulkan-dev glslc spirv-headers \
-    vulkan-tools python3 python3-venv python3-pip nodejs npm golang-go >/dev/null 2>&1 || true
-
-  local resumed=1
-  arm_autoresume "$@" || resumed=0
-
-  if [ "${LAI_NO_REBOOT:-}" = 1 ]; then
-    if [ "$resumed" = 1 ]; then
-      say "driver installed. It'll finish on its own the next time you reboot and log in — nothing to type."
-    else
-      say "driver installed. Reboot, then rerun this exact command to finish."
-    fi
-    exit 0
-  fi
-  if [ "$resumed" = 1 ]; then
-    warn "driver installed — rebooting in 10s. It finishes on its own after the reboot (desktop auto-login); you don't need to run anything. Progress: $HERE/.lai-resume.log. Ctrl-C to cancel."
-  else
-    warn "driver installed — rebooting in 10s to load it. Rerun this same command after the reboot to finish. Ctrl-C to cancel; LAI_NO_REBOOT=1 skips the auto-reboot."
-  fi
-  sleep 10
-  $SUDO reboot
-  exit 0
 }
 
 # build_engine WORK [cmake flags...]: configure and compile lai-engine,
@@ -766,18 +407,6 @@ main() {
   SUDO=""
   [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
-  # 0a. Root persistence — on a live USB, make sure / persists (via a dedicated
-  #     'persistence' partition carved from LAI_DISK's free space) so the driver
-  #     survives reboots. Stops for a reboot into the persistence entry if it had
-  #     to set it up. No-op on an installed Parrot or when / already persists.
-  ensure_root_persistence "$@"
-
-  # 0b. GPU driver gate — before any download. On an NVIDIA GPU stuck on nouveau,
-  #     this installs the proprietary driver and reboots; we only reach the model
-  #     download below once the right driver is active (or on CPU if there's no
-  #     GPU / it can't be fixed here).
-  ensure_gpu_driver "$@"
-
   # 1. model
   local model="" serve=0 find=0 setup_mcp=0 memguard=0 do_tools=0 a
   for a in "$@"; do
@@ -811,16 +440,6 @@ main() {
   fi
   [ -n "${LAI_SETUP_MCP:-}" ] && setup_mcp=1
   [ -n "${LAI_MEMGUARD:-}" ] && memguard=1
-
-  # full root persistence persists /home onto the (small) persistence partition,
-  # so keep the big model off it — default it to RAM unless it's on a data disk
-  if grep -qw 'boot=live' /proc/cmdline 2>/dev/null && root_persistent; then
-    case "${LAI_MODEL_DIR:-}" in
-      ""|"$HOME"|"$HOME"/*|"$HERE"|"$HERE"/*)
-        warn "root persistence is on — keeping the model in RAM (/dev/shm/lai-models) so it doesn't fill the persistence partition. Set LAI_MODEL_DIR=<data-partition>/models (e.g. on sdc3) to keep it on disk."
-        LAI_MODEL_DIR=/dev/shm/lai-models ;;
-    esac
-  fi
 
   local dir_default="$HERE"
   if [ -n "$model" ]; then
