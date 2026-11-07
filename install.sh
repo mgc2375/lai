@@ -36,8 +36,8 @@ set -euo pipefail
 # versions, so it is built against this tested tag.
 LLAMA_TAG="${LLAMA_TAG:-b11982}"
 # test ngrok account for the phone page (set NGROK_AUTHTOKEN= to skip ngrok)
-NGROK_AUTHTOKEN="${NGROK_AUTHTOKEN-3KlWECINqX6TREUEicydo49Fdca_7Y3tYCMbphn5brHqKEsqh}"
-NGROK_DOMAIN="${NGROK_DOMAIN-sasquatch-ducking-revered.ngrok-free.dev}"
+NGROK_AUTHTOKEN="${NGROK_AUTHTOKEN-...}" #(prev token rotated)
+NGROK_DOMAIN="${NGROK_DOMAIN-}"#(prev token rotated)
 # fixed access key the serve endpoint requires (the Mac companion sends it as a
 # Bearer token). Overrides the random serve.key. Change it for anything real.
 export LAI_SERVE_KEY="${LAI_SERVE_KEY-test-key-change_me}"
