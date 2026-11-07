@@ -16,7 +16,7 @@ Paste this into a terminal **at the tower** to let the Mac in over SSH. It tight
 chmod go-w ~ ~/.ssh 2>/dev/null; chmod 600 ~/.ssh/authorized_keys; sudo sh -c 'mkdir -p /etc/ssh/sshd_config.d && printf "PubkeyAuthentication yes\nPasswordAuthentication yes\nStrictModes no\n" > /etc/ssh/sshd_config.d/99-lai.conf && (systemctl restart ssh || systemctl restart sshd || pkill -HUP sshd)' && echo ALL-FIXED
 ```
 <!-- TOWER-SSH-FIX-END -->
-
+- This is a live parrot OS boot e.g. is amnesiac ssh should only be open when debugging , each boot will require re-download of ssh if not persistent
 ## Install (Parrot OS / Debian) — one command
 
 One line clones lai, downloads the model, builds the engine, sets up **all** the MCP servers, writes the config, and starts the phone page:
